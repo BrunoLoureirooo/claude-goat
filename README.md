@@ -20,13 +20,32 @@ Why Node and not bash? Claude Code has Node as a hard runtime dependency, so any
 | `skills/*` | `~/.claude/skills/` | Merged in — skill folders that already exist are skipped, everything else already there is left alone |
 | plugins (superpowers, typescript-lsp, security-guidance) | `claude plugin install` | Installed through the claude CLI from the official marketplace, skipped if already installed (`--no-plugins` to opt out) |
 | MCP servers (playwright, context7) | `claude mcp add --scope user` | Registered through the claude CLI, skipped if already registered (`--no-plugins` covers these too) |
+| `SETTINGS_PATCH` / `ENV_PATCH` in `install.mjs` | `~/.claude/settings.json` | Edited in place — only the listed keys are merged in, everything else already there (`enabledPlugins`, `theme`, your own `env` vars, …) is left alone. Invalid JSON is reported and left untouched rather than clobbered |
 
 Nothing else in `~/.claude/` is touched. Re-running is safe (idempotent, backup gets refreshed).
+
+## Install vs. init
+
+`install.mjs` does two independent jobs — global install (this table) and project init (next section) — runnable separately or together:
+
+```bash
+node install.mjs --install   # only ~/.claude: CLAUDE.md, skills, plugins, MCPs, settings.json
+node install.mjs --init      # only the current directory: scaffold + interview
+node install.mjs             # let it decide (see below), or the packed file will ask you
+```
+
+With neither flag:
+- **repo mode, run from the repo root** → install only (there's no project to scaffold)
+- **repo mode, run from elsewhere** → both
+- **packed file (`dist/claude-goat.mjs`), interactive terminal** → prompts you to pick 1/2/3
+- **packed file, piped or scripted (no TTY)** → defaults to both, so it never hangs waiting for input
 
 **What each one is for:**
 - `superpowers` — the brainstorm → plan → execute → verify → ship skill loop; see [templates/interview.md](templates/interview.md) for how it's wired into project init.
 - `typescript-lsp` — real-time TS diagnostics after every edit. Needs the `typescript-language-server` binary on `PATH` (`pnpm add -g typescript typescript-language-server` — plain `npm i -g` needs root on systems where Node is installed system-wide). Only useful in TS/JS projects; harmless elsewhere.
 - `security-guidance` — reviews each change for common vulnerabilities and has Claude fix findings in-session.
+- `effortLevel: "medium"` — the default `"high"` reasons more deeply (and slower) on every single turn; this trades some of that depth for speed. Ask for deeper reasoning explicitly on hard problems.
+- `env.ENABLE_STOP_REVIEW: "0"` — `security-guidance` otherwise runs an LLM diff review after every response, not just at commit/push. This disables just that per-turn pass; pattern-based warnings on edits and the LLM review at `git commit`/`git push` still run.
 - `playwright` MCP — the browser the global CLAUDE.md's Real Verification rule drives for UI work.
 - `context7` MCP — up-to-date library docs on demand, so scaffolded code isn't written against a stale training-cutoff API.
 
@@ -36,16 +55,18 @@ Same script, run from the root of a fresh (or existing) project instead of the r
 
 ```bash
 node /path/to/claude-goat/install.mjs             # global install + scaffold + interactive fill-in
+node /path/to/claude-goat/install.mjs --init      # scaffold only, skip the global install
 node /path/to/claude-goat/install.mjs --no-claude # skip the interview launch
 ```
 
-Run from anywhere other than the repo itself, it first does the global install above (skipping what's already there), then scaffolds the project — again skipping anything that already exists:
+Run from anywhere other than the repo itself with no flags, it does both — the global install above (skipping what's already there), then scaffolds the project — again skipping anything that already exists:
 
 | File | What it is |
 |---|---|
 | `CLAUDE.md` | Project instructions, full of `INIT:` placeholder comments |
 | `docs/DESIGN.md` | Canonical visual system (tokens, typography, motion) — what `/impeccable` reads |
-| `docs/features/_TEMPLATE.md` | Per-feature doc template: plan first, then implementation context |
+| `docs/features/_TEMPLATE.md` | Per-slice doc template: plan first, then implementation context |
+| `src/` | Empty on creation. All code lives here — non-negotiable, stated in `CLAUDE.md`'s Architecture section; the `00-scaffolding` slice always populates it first |
 
 Then it launches `claude` with [templates/interview.md](templates/interview.md) as the prompt, which runs three phases in one session:
 
@@ -71,7 +92,7 @@ claude-goat.mjs          # if it's on your PATH (it's chmod +x)
 node claude-goat.mjs     # works anywhere, including Windows
 ```
 
-It behaves exactly like running `install.mjs` from a project root: global install (skip what exists), plugin install via the claude CLI (needs network; skipped gracefully if `claude` isn't on PATH), scaffold (skip what exists), then the Claude interview. Re-run `node build.mjs` after editing any skill or template — the packed file is a snapshot, not a live view.
+Run with no arguments in an interactive terminal, it prompts you: install only, init only, or both. Pass `--install` or `--init` to skip the prompt, or pipe/script it (no TTY) and it defaults to both so it never hangs. Otherwise it behaves like `install.mjs` from a project root: global install (skip what exists), plugin install via the claude CLI (needs network; skipped gracefully if `claude` isn't on PATH), scaffold (skip what exists), then the Claude interview. Re-run `node build.mjs` after editing any skill or template — the packed file is a snapshot, not a live view.
 
 Plugins live in the `PLUGINS` list at the top of `install.mjs` — add a `[plugin@marketplace, marketplace-repo]` pair and rebuild.
 
@@ -107,9 +128,10 @@ claude-goat/
 └── skills/
     ├── caveman/             # ultra-compressed output mode (~75% fewer tokens)
     ├── grill-with-docs/     # stress-test a plan against domain docs/ADRs
-    └── impeccable/          # frontend design/audit toolkit (reference docs + scripts)
+    ├── impeccable/          # frontend design/audit toolkit (reference docs + scripts)
+    └── quick-fix/           # speed mode: skip ceremony + verification for low-stakes edits
 ```
 
 ## Verifying it loaded
 
-Inside a Claude Code session, `/memory` shows which instruction files are active — the global `CLAUDE.md` should be listed. To see a skill fire, describe a matching task (e.g. "add an EF Core entity for invoices") and watch it pick up `dotnet-conventions`.
+Inside a Claude Code session, `/memory` shows which instruction files are active — the global `CLAUDE.md` should be listed. To see a skill fire, describe a matching task (e.g. "add an EF Core entity for invoices") and watch it pick up `/caveman`.

@@ -11,6 +11,8 @@ Phase 1 — Configure
    - the real commands: primary dev loop, build, test, type-check — and any traps (e.g. a dev server that skips edge functions)
    - does it have a UI? if yes: fonts, palette and accent budget, motion rules and reduced-motion behavior; if no, delete the Design rules section from CLAUDE.md and gut docs/DESIGN.md to a one-line stub
 
+   The stack question needs a concrete, named answer — a specific framework, language and hosting target — not "not sure yet" or "TBD". If there's no existing code to infer it from and I'm genuinely undecided, don't skip past it: stop and work the decision through with me right there (trade-offs, your recommendation, a pick) before moving on. Nothing later in this process can proceed against an unresolved stack.
+
 3. Rewrite CLAUDE.md and docs/DESIGN.md from the answers. Every INIT: comment must be gone — replaced with real content, or its whole section deleted. Never leave an empty section. Leave docs/features/_TEMPLATE.md untouched; it is a template to be copied. Keep CLAUDE.md under 200 lines — overflow goes to referenced files in docs/.
 
 Phase 2 — Shape
@@ -21,6 +23,15 @@ Phase 2 — Shape
 
 Phase 3 — Plan
 
-6. Invoke the superpowers:writing-plans skill and turn the shaped milestone into an implementation plan. Save it as docs/features/<feature>.md following the structure of docs/features/_TEMPLATE.md, with Status: planned. Anything intentionally deferred goes into the TODOs section of CLAUDE.md, so future sessions neither build it early nor flag it as broken.
+Before writing anything: re-check CLAUDE.md's stack section. If it's still a placeholder, a guess, or otherwise not concrete, stop and go back to Phase 1 step 2 — do not plan implementation against a stack that isn't nailed down.
 
-7. Finish with a short summary: what you configured, what you inferred from code vs. asked me, the plan you wrote and where it lives, and what is parked for later.
+6. Invoke the superpowers:writing-plans skill, but do not produce one plan that builds the whole app. Break the milestone into an ordered sequence of small, independently-shippable slices — a tracer-bullet path, not a monolith:
+   - The first slice is always scaffolding: the minimum project skeleton needed before any real feature can be built (tooling, empty shell/entry point, base layout, CI if relevant) — nothing user-facing yet. All code lives under `src/`; this slice's own steps always create the initial folders and/or files there (per the chosen stack's convention) — it never finishes without touching `src/`.
+   - Each slice after that is one small vertical slice of the milestone, thin enough to build and verify end-to-end on its own.
+   - Write each slice as its own file, copied from docs/features/_TEMPLATE.md, named docs/features/NN-<slug>.md with a two-digit build-order prefix (00-scaffolding.md, 01-<first-slice>.md, 02-<next-slice>.md, …). Never combine multiple slices into one file, and never write a single file that spans the entire milestone.
+   - Within each slice's Plan section, break it further into its individual features (e.g. a "document processing" slice decomposes into: uploads page, file upload, output generation) and insert a Checkpoint after every one of them, not just at the end of the slice — see the guidance already in _TEMPLATE.md's Plan section for the exact format. These checkpoints are what make each feature verifiable on its own instead of only at the end of the whole slice.
+   - Each file's Status starts at planned. Cross-reference: each slice's "What & why" names the slice before and after it, so reading order is obvious without a separate index.
+
+   Anything intentionally deferred beyond this milestone goes into the TODOs section of CLAUDE.md, so future sessions neither build it early nor flag it as broken.
+
+7. Finish with a short summary: what you configured, what you inferred from code vs. asked me, the resolved stack, the ordered list of slice files you wrote and where they live, and what is parked for later.

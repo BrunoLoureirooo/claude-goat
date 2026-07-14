@@ -1,11 +1,20 @@
-// install.mjs — the one script for both jobs:
-//   from the repo root:       node install.mjs        → global CLAUDE.md + skills → ~/.claude
-//   from a project's root:    node /path/to/claude-goat/install.mjs
-//                             → same global install, PLUS scaffolds CLAUDE.md + docs/ in the
-//                               project and launches Claude Code to interview you and fill them in
-// Pass --no-claude to skip the interview launch, --no-plugins to skip plugin + MCP installs.
-// Anything that already exists — a skill folder, a scaffold file — is skipped, never overwritten.
-// Sole exception: the global CLAUDE.md, which is backed up then refreshed.
+// install.mjs — two independent jobs, runnable separately or together:
+//   install → global CLAUDE.md, skills, plugins, MCPs, settings.json patch → ~/.claude
+//   init    → scaffolds CLAUDE.md + docs/ in the CURRENT directory, then launches Claude
+//             Code to interview you and fill them in
+//
+// Flags: --install (install only), --init (init only), --no-claude (init: skip the
+// interview launch), --no-plugins (install: skip plugin + MCP installs).
+// Pass neither --install nor --init and:
+//   - repo mode, run from the repo root            → install only
+//   - repo mode, run from elsewhere                 → both
+//   - packed (dist/claude-goat.mjs), interactive TTY → prompts you to choose
+//   - packed, non-interactive (piped/scripted)       → both
+//
+// Anything that already exists — a skill folder, a scaffold file — is skipped, never
+// overwritten. Exceptions: the global CLAUDE.md, which is backed up then refreshed, and
+// settings.json, which is edited in place (only SETTINGS_PATCH keys and ENV_PATCH env vars
+// are touched — everything else the user has in there, including enabledPlugins, is left alone).
 //
 // `node build.mjs` packs this script + all payload files into dist/claude-goat.mjs, a single
 // portable file that does the same thing anywhere without the repo.
@@ -14,6 +23,7 @@ import { join, dirname } from "node:path";
 import { fileURLToPath } from "node:url";
 import { cp, mkdir, readdir, access, copyFile, readFile, writeFile } from "node:fs/promises";
 import { spawnSync } from "node:child_process";
+import { createInterface } from "node:readline/promises";
 
 const EMBEDDED = null; // ← build.mjs replaces this line with the packed payload
 
@@ -24,6 +34,8 @@ const targetMd = join(claudeDir, "CLAUDE.md");
 const project = process.cwd();
 const noClaude = process.argv.includes("--no-claude");
 const noPlugins = process.argv.includes("--no-plugins");
+const flagInstall = process.argv.includes("--install");
+const flagInit = process.argv.includes("--init");
 const winShell = process.platform === "win32";
 
 // plugins to install through the claude CLI: [plugin@marketplace, marketplace source repo]
@@ -38,6 +50,11 @@ const MCPS = [
   ["playwright", "npx", "@playwright/mcp@latest"],
   ["context7", "npx", "-y", "@upstash/context7-mcp"],
 ];
+
+// top-level settings.json keys asserted on every run (merged in, not replaced wholesale)
+const SETTINGS_PATCH = { effortLevel: "medium" };
+// env vars merged into settings.json's "env" object, alongside whatever the user already has
+const ENV_PATCH = { ENABLE_STOP_REVIEW: "0" }; // security-guidance: skip the per-turn Stop review
 
 // packed mode: a flat { "skills/x/SKILL.md": "content", ... } map instead of the repo on disk
 let files = null;
@@ -76,124 +93,175 @@ async function copySkill(name, dest) {
   }
 }
 
-if (!files && !(await exists(join(here, "skills")))) {
-  console.error("✗ can't find ./skills next to install.mjs — the repo is incomplete");
-  process.exit(1);
-}
-
-// ── global install ──────────────────────────────────────────────────────────
-await mkdir(skillsDir, { recursive: true });
-
-if (await exists(targetMd)) {
-  const backup = join(claudeDir, "CLAUDE_bak.md");
-  await copyFile(targetMd, backup);
-  console.log(`⚠ existing global CLAUDE.md — backed up to ${backup}`);
-}
-await writeFile(targetMd, await readSource("global/CLAUDE.md"));
-console.log(`✓ global CLAUDE.md → ${targetMd}`);
-
-for (const name of await skillNames()) {
-  const dest = join(skillsDir, name);
-  if (await exists(dest)) {
-    console.log(`⚠ skill ${name} already installed — skipped`);
-    continue;
+async function runInstall() {
+  if (!files && !(await exists(join(here, "skills")))) {
+    console.error("✗ can't find ./skills next to install.mjs — the repo is incomplete");
+    process.exit(1);
   }
-  await copySkill(name, dest);
-  console.log(`✓ skill ${name}`);
-}
 
-// ── plugins (via the claude CLI; skipped if already installed) ──────────────
-if (!noPlugins && PLUGINS.length > 0) {
-  const installed = spawnSync("claude", ["plugin", "list"], { encoding: "utf8", shell: winShell });
-  if (installed.error || installed.status !== 0) {
-    console.log(`⚠ claude CLI not reachable — plugins skipped. Install manually: claude plugin install ${PLUGINS.map(([s]) => s).join(" ")}`);
-  } else {
-    const markets = spawnSync("claude", ["plugin", "marketplace", "list"], { encoding: "utf8", shell: winShell });
-    for (const [spec, repo] of PLUGINS) {
-      if (installed.stdout.includes(spec)) {
-        console.log(`⚠ plugin ${spec} already installed — skipped`);
-        continue;
+  console.log("── install: global setup ───────────────────────────────────────────────────");
+  await mkdir(skillsDir, { recursive: true });
+
+  if (await exists(targetMd)) {
+    const backup = join(claudeDir, "CLAUDE_bak.md");
+    await copyFile(targetMd, backup);
+    console.log(`⚠ existing global CLAUDE.md — backed up to ${backup}`);
+  }
+  await writeFile(targetMd, await readSource("global/CLAUDE.md"));
+  console.log(`✓ global CLAUDE.md → ${targetMd}`);
+
+  const settingsPath = join(claudeDir, "settings.json");
+  let settings = {};
+  let settingsReadable = true;
+  if (await exists(settingsPath)) {
+    try {
+      settings = JSON.parse(await readFile(settingsPath, "utf8"));
+    } catch {
+      settingsReadable = false;
+      console.log(`⚠ ${settingsPath} isn't valid JSON — left untouched, fix it manually`);
+    }
+  }
+  if (settingsReadable) {
+    settings = { ...settings, ...SETTINGS_PATCH, env: { ...(settings.env ?? {}), ...ENV_PATCH } };
+    await writeFile(settingsPath, JSON.stringify(settings, null, 2) + "\n");
+    console.log(`✓ settings.json → effortLevel: ${SETTINGS_PATCH.effortLevel}, env.${Object.keys(ENV_PATCH)[0]}=${Object.values(ENV_PATCH)[0]}`);
+  }
+
+  for (const name of await skillNames()) {
+    const dest = join(skillsDir, name);
+    if (await exists(dest)) {
+      console.log(`⚠ skill ${name} already installed — skipped`);
+      continue;
+    }
+    await copySkill(name, dest);
+    console.log(`✓ skill ${name}`);
+  }
+
+  // plugins (via the claude CLI; skipped if already installed)
+  if (!noPlugins && PLUGINS.length > 0) {
+    const installed = spawnSync("claude", ["plugin", "list"], { encoding: "utf8", shell: winShell });
+    if (installed.error || installed.status !== 0) {
+      console.log(`⚠ claude CLI not reachable — plugins skipped. Install manually: claude plugin install ${PLUGINS.map(([s]) => s).join(" ")}`);
+    } else {
+      const markets = spawnSync("claude", ["plugin", "marketplace", "list"], { encoding: "utf8", shell: winShell });
+      for (const [spec, repo] of PLUGINS) {
+        if (installed.stdout.includes(spec)) {
+          console.log(`⚠ plugin ${spec} already installed — skipped`);
+          continue;
+        }
+        // a marketplace must be registered before installing from it — first-run machines
+        // that have never started claude interactively won't even have the official one
+        const marketName = spec.split("@")[1];
+        if (!markets.stdout?.includes(marketName)) {
+          spawnSync("claude", ["plugin", "marketplace", "add", repo], { stdio: "inherit", shell: winShell });
+        }
+        const res = spawnSync("claude", ["plugin", "install", spec], { stdio: "inherit", shell: winShell });
+        console.log(res.status === 0 ? `✓ plugin ${spec}` : `✗ plugin ${spec} failed — install manually with: claude plugin install ${spec}`);
       }
-      // a marketplace must be registered before installing from it — first-run machines
-      // that have never started claude interactively won't even have the official one
-      const marketName = spec.split("@")[1];
-      if (!markets.stdout?.includes(marketName)) {
-        spawnSync("claude", ["plugin", "marketplace", "add", repo], { stdio: "inherit", shell: winShell });
+    }
+  }
+
+  // MCP servers (via the claude CLI; skipped if already registered)
+  if (!noPlugins && MCPS.length > 0) {
+    const registered = spawnSync("claude", ["mcp", "list"], { encoding: "utf8", shell: winShell });
+    if (registered.error) {
+      console.log(`⚠ claude CLI not reachable — MCP servers skipped. Register manually: claude mcp add --scope user ${MCPS.map(([n]) => n).join(", ")}`);
+    } else {
+      for (const [name, ...cmd] of MCPS) {
+        if (registered.stdout?.includes(`${name}:`)) {
+          console.log(`⚠ mcp ${name} already registered — skipped`);
+          continue;
+        }
+        const res = spawnSync("claude", ["mcp", "add", "--scope", "user", name, "--", ...cmd], { stdio: "inherit", shell: winShell });
+        console.log(res.status === 0 ? `✓ mcp ${name}` : `✗ mcp ${name} failed — register manually with: claude mcp add --scope user ${name} -- ${cmd.join(" ")}`);
       }
-      const res = spawnSync("claude", ["plugin", "install", spec], { stdio: "inherit", shell: winShell });
-      console.log(res.status === 0 ? `✓ plugin ${spec}` : `✗ plugin ${spec} failed — install manually with: claude plugin install ${spec}`);
     }
   }
 }
 
-// ── MCP servers (via the claude CLI; skipped if already registered) ─────────
-if (!noPlugins && MCPS.length > 0) {
-  const registered = spawnSync("claude", ["mcp", "list"], { encoding: "utf8", shell: winShell });
-  if (registered.error) {
-    console.log(`⚠ claude CLI not reachable — MCP servers skipped. Register manually: claude mcp add --scope user ${MCPS.map(([n]) => n).join(", ")}`);
-  } else {
-    for (const [name, ...cmd] of MCPS) {
-      if (registered.stdout?.includes(`${name}:`)) {
-        console.log(`⚠ mcp ${name} already registered — skipped`);
-        continue;
-      }
-      const res = spawnSync("claude", ["mcp", "add", "--scope", "user", name, "--", ...cmd], { stdio: "inherit", shell: winShell });
-      console.log(res.status === 0 ? `✓ mcp ${name}` : `✗ mcp ${name} failed — register manually with: claude mcp add --scope user ${name} -- ${cmd.join(" ")}`);
+async function runInit() {
+  if (!files && project === here) {
+    console.error("✗ you're inside claude-goat itself — cd into the project you want to initialize");
+    process.exit(1);
+  }
+
+  console.log("── init: project scaffold ──────────────────────────────────────────────────");
+
+  // [template file, destination relative to the project root]
+  const plan = [
+    ["CLAUDE.project.md", "CLAUDE.md"],
+    ["DESIGN.md", join("docs", "DESIGN.md")],
+    ["feature.md", join("docs", "features", "_TEMPLATE.md")],
+  ];
+
+  await mkdir(join(project, "docs", "features"), { recursive: true });
+  await mkdir(join(project, "src"), { recursive: true });
+
+  let created = 0;
+  for (const [src, dest] of plan) {
+    if (await exists(join(project, dest))) {
+      console.log(`⚠ ${dest} already exists — skipped`);
+      continue;
     }
+    await writeFile(join(project, dest), await readSource(`templates/${src}`));
+    console.log(`✓ ${dest}`);
+    created++;
+  }
+
+  if (created === 0) {
+    console.log("\n→ project already initialized — nothing scaffolded.");
+    return;
+  }
+
+  if (noClaude) {
+    console.log("\n→ scaffolding done. Start Claude Code here and ask it to interview you and fill in the INIT: placeholders.");
+    return;
+  }
+
+  let prompt = await readSource("templates/interview.md");
+  // cmd.exe can't pass a multi-line argument through — flatten on Windows
+  if (process.platform === "win32") prompt = prompt.replace(/\s+/g, " ").trim();
+
+  console.log("\n→ launching Claude Code to interview you and fill in the placeholders…\n");
+  const res = spawnSync("claude", [prompt], { stdio: "inherit", shell: winShell });
+
+  if (res.error) {
+    console.error("✗ couldn't launch `claude` — is it on your PATH?");
+    console.error("  Start Claude Code in this directory yourself and say:");
+    console.error("  «Interview me, fill in every INIT: placeholder in CLAUDE.md and docs/DESIGN.md, then brainstorm and write a plan for the first milestone into docs/features/»");
+    process.exit(1);
   }
 }
 
-// ── project scaffold ────────────────────────────────────────────────────────
-// repo mode: only when run from somewhere other than the repo itself
-// packed mode: always — the file lives wherever, the project is the cwd
-if (!files && project === here) {
-  console.log("\n→ global setup done. Run this same script from a project's root to also scaffold CLAUDE.md + docs/ there.");
-  process.exit(0);
-}
-
-// [template file, destination relative to the project root]
-const plan = [
-  ["CLAUDE.project.md", "CLAUDE.md"],
-  ["DESIGN.md", join("docs", "DESIGN.md")],
-  ["feature.md", join("docs", "features", "_TEMPLATE.md")],
-];
-
-await mkdir(join(project, "docs", "features"), { recursive: true });
-
-let created = 0;
-for (const [src, dest] of plan) {
-  if (await exists(join(project, dest))) {
-    console.log(`⚠ ${dest} already exists — skipped`);
-    continue;
+async function promptMode() {
+  const rl = createInterface({ input: process.stdin, output: process.stdout });
+  try {
+    const answer = (await rl.question(
+      "\nWhat do you want to run?\n" +
+      "  [1] install — global CLAUDE.md, skills, plugins, MCPs (~/.claude)\n" +
+      "  [2] init    — scaffold + interview this project only\n" +
+      "  [3] both (default)\n" +
+      "Choice [1/2/3]: "
+    )).trim();
+    if (answer === "1") return "install";
+    if (answer === "2") return "init";
+    return "both";
+  } finally {
+    rl.close();
   }
-  await writeFile(join(project, dest), await readSource(`templates/${src}`));
-  console.log(`✓ ${dest}`);
-  created++;
 }
 
-if (created === 0) {
-  console.log("\n→ project already initialized — nothing scaffolded.");
-  process.exit(0);
-}
+let mode;
+if (flagInstall && !flagInit) mode = "install";
+else if (flagInit && !flagInstall) mode = "init";
+else if (flagInstall && flagInit) mode = "both";
+else if (files && process.stdin.isTTY && process.stdout.isTTY) mode = await promptMode();
+else if (!files && project === here) mode = "install"; // repo mode, run from the repo root
+else mode = "both"; // repo mode from a project dir, or packed + non-interactive
 
-if (noClaude) {
-  console.log("\n→ scaffolding done. Start Claude Code here and ask it to interview you and fill in the INIT: placeholders.");
-  process.exit(0);
-}
+if (mode === "install" || mode === "both") await runInstall();
+if (mode === "init" || mode === "both") await runInit();
 
-let prompt = await readSource("templates/interview.md");
-// cmd.exe can't pass a multi-line argument through — flatten on Windows
-if (process.platform === "win32") prompt = prompt.replace(/\s+/g, " ").trim();
-
-console.log("\n→ launching Claude Code to interview you and fill in the placeholders…\n");
-const res = spawnSync("claude", [prompt], {
-  stdio: "inherit",
-  shell: winShell,
-});
-
-if (res.error) {
-  console.error("✗ couldn't launch `claude` — is it on your PATH?");
-  console.error("  Start Claude Code in this directory yourself and say:");
-  console.error("  «Interview me, fill in every INIT: placeholder in CLAUDE.md and docs/DESIGN.md, then brainstorm and write a plan for the first milestone into docs/features/»");
-  process.exit(1);
+if (mode === "install") {
+  console.log("\n→ global install done. Re-run with --init (or from a project's root) to also scaffold a project.");
 }

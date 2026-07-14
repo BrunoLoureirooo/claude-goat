@@ -40,14 +40,16 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 ## File conventions
 
 See [docs/DESIGN.md](docs/DESIGN.md) — canonical visual system: tokens, typography, motion.
-Each large feature gets `docs/features/<feature>.md` — plan first, then implementation context. Copy [docs/features/_TEMPLATE.md](docs/features/_TEMPLATE.md).
+Each small, independently-shippable slice gets its own `docs/features/NN-<slug>.md` (two-digit build-order prefix, e.g. `00-scaffolding.md`, `01-<first-slice>.md`) — plan first, then implementation context. Copy [docs/features/_TEMPLATE.md](docs/features/_TEMPLATE.md) per slice; never combine slices into one file or let one file span the whole app.
 
 <!-- INIT: add pointers to any other canonical docs (PRODUCT.md, docs/PHASES.md, …), each with
      a one-line "what lives there and who reads it". Delete this comment if there are none. -->
 
 ## Architecture
 
-<!-- INIT: annotated tree of only the directories that matter, e.g.
+All code lives under `src/` — no exceptions carved out per file type or framework convention.
+
+<!-- INIT: annotated tree of the directories inside src/ that matter, e.g.
 
 src/
   layouts/       # single layout shell
@@ -68,7 +70,9 @@ no code change"). -->
 
 - Large-scale code analysis → deploy Haiku agents
 - All visual changes → run `/impeccable` `/design-motion-principles`
-- Each large feature → create `docs/features/<feature>.md` (plan first, then impl context)
+- Each slice → its own `docs/features/NN-<slug>.md` (plan first, then impl context) — never one file per app or per milestone
+- All code → under `src/`; the scaffolding slice (`00-scaffolding.md`) always creates the initial folders/files there, never leaves it empty
+- Executing a slice → after every individual feature within it (not just at the end of the slice), stop at the plan's Checkpoint: ask whether the user will test it themselves or wants Claude to spin up an agent to test it (Playwright MCP for a UI flow, a subagent otherwise) — wait for their answer before starting the next feature
 - Every implemented feature → spin up the app and drive the real flow in a browser via the Playwright MCP before marking complete; ≥90% confidence from observed behavior or report it as UNVERIFIED
 - CLAUDE.md max 200 lines — overflow goes to referenced docs/
 
