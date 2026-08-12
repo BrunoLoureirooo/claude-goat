@@ -64,6 +64,24 @@ instead of starting from zero.
 Because nothing executes inside a session, a bug in this script can never
 disrupt Claude Code.
 
+## Effect on the existing flow
+
+None. `metrics.mjs` is standalone and manual — not called by `install.mjs`, not
+by `build.mjs`, not on a schedule, not on session end.
+
+| Command | Change |
+|---|---|
+| `node install.mjs` | unchanged, except `runInit()` writes `.claude-goat.json` |
+| `node build.mjs` | unchanged; `metrics.mjs` stays repo-only and is **not** added to the packed payload — records derive from the local `~/.claude/projects`, and analysis happens where the repo lives |
+| `node metrics.mjs` | new |
+
+It writes only inside `~/.claude/claude-goat/`. Projects, `settings.json`,
+skills and the global `CLAUDE.md` are read at most, never modified.
+
+The cost of being manual: a session whose transcript is pruned before a scan is
+lost permanently. Accepted for now; the rejected `SessionEnd` hook is the fix if
+that turns out to matter.
+
 ## Inputs
 
 ### 1. Transcripts — `~/.claude/projects/<slug>/<session-id>.jsonl`
