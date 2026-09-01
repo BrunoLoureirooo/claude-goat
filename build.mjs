@@ -11,16 +11,20 @@ const out = join(here, "dist", "claude-goat.mjs");
 
 const files = {};
 async function collect(dir) {
-  for (const d of await readdir(join(here, dir), { withFileTypes: true, recursive: true })) {
-    if (!d.isFile()) continue;
-    const abs = join(d.parentPath, d.name);
-    const buf = await readFile(abs);
-    if (buf.includes(0)) {
-      console.error(`✗ ${abs} looks binary — the packer only embeds text files`);
-      process.exit(1);
+  const entries = await readdir(join(here, dir), { withFileTypes: true });
+  for (const d of entries) {
+    const abs = join(here, dir, d.name);
+    if (d.isDirectory()) {
+      await collect(join(dir, d.name));
+    } else if (d.isFile()) {
+      const buf = await readFile(abs);
+      if (buf.includes(0)) {
+        console.error(`✗ ${abs} looks binary — the packer only embeds text files`);
+        process.exit(1);
+      }
+      // keys always use forward slashes, whatever the build platform
+      files[relative(here, abs).split(sep).join("/")] = buf.toString("utf8");
     }
-    // keys always use forward slashes, whatever the build platform
-    files[relative(here, abs).split(sep).join("/")] = buf.toString("utf8");
   }
 }
 await collect("global");

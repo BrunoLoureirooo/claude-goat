@@ -23,7 +23,15 @@ import { join, dirname } from "node:path";
 import { fileURLToPath } from "node:url";
 import { cp, mkdir, readdir, access, copyFile, readFile, writeFile } from "node:fs/promises";
 import { spawnSync } from "node:child_process";
-import { createInterface } from "node:readline/promises";
+import { createInterface as _createInterface } from "node:readline";
+
+// node:readline/promises requires Node 17+; wrap the callback API for compat
+function createInterface(opts) {
+  const rl = _createInterface(opts);
+  const _question = rl.question.bind(rl);
+  rl.question = (prompt) => new Promise((resolve) => _question(prompt, resolve));
+  return rl;
+}
 
 const EMBEDDED = null; // ← build.mjs replaces this line with the packed payload
 
