@@ -54,12 +54,12 @@ With neither flag:
 
 ## Orchestrator mode
 
-After the install, every interactive session runs as the `orchestrator` agent: the main thread plans, writes briefs, dispatches `haiku-worker`, `sonnet-worker` or `opus-worker` (cheapest tier that can do the job) and judges their reports, instead of reading and editing project files itself. The agent file has an empty body, so Claude Code's default system prompt stays; the directions it follows live in `~/.claude/guidelines/orchestrator.md` and reach the session through `hooks/orchestrator-brief.mjs` on startup, resume, `/clear` and compaction. Headless sessions (`claude -p`, the SDK) don't get them unless `ORCHESTRATOR_BRIEF_FORCE=1`. The two env keys make subagents that name no model run on Sonnet rather than the main model, and turn off forks (which copy the main model and the whole conversation).
+After the install (if `agent` wasn't already set), every interactive session runs as the `orchestrator` agent: the main thread plans, writes briefs, dispatches `haiku-worker`, `sonnet-worker` or `opus-worker` (cheapest tier that can do the job) and judges their reports, instead of reading and editing project files itself. The agent file has an empty body, so Claude Code's default system prompt stays; the directions it follows live in `~/.claude/guidelines/orchestrator.md` and reach the session through `hooks/orchestrator-brief.mjs` on startup, resume, `/clear` and compaction. Headless sessions (`claude -p`, the SDK) don't get them unless `ORCHESTRATOR_BRIEF_FORCE=1`. The hook is added even when `agent` was already set, so the directions then reach that agent's sessions too; use the off switch or remove the entry if that isn't wanted. The two env keys make subagents that name no model run on Sonnet rather than the main model, and turn off forks (which copy the main model and the whole conversation).
 
 - **Off switch:** `ORCHESTRATOR_BRIEF=off` in the environment skips the directions.
 - **One plain session:** `ORCHESTRATOR_BRIEF=off claude --agent claude` (PowerShell: `$env:ORCHESTRATOR_BRIEF="off"; claude --agent claude`, which lasts for that shell).
 - **Workers only:** `node install.mjs --no-orchestrator` installs the three workers and leaves the orchestrator agent, directions, hook and settings keys out.
-- **Undo:** delete `agent` and the `orchestrator-brief.mjs` `SessionStart` entry from `~/.claude/settings.json`.
+- **Undo:** delete `agent` and the `orchestrator-brief.mjs` `SessionStart` entry from `~/.claude/settings.json`; remove `env.CLAUDE_CODE_SUBAGENT_MODEL` and `env.CLAUDE_CODE_FORK_SUBAGENT` too if you want the old subagent defaults back.
 
 Behaviour this relies on, as observed on one Claude Code version: [docs/claude-code-notes.md](docs/claude-code-notes.md).
 

@@ -258,6 +258,10 @@ function mergeOrchestratorSettings(settings) {
     }
   }
   settings.hooks ??= {};
+  if (typeof settings.hooks !== "object" || Array.isArray(settings.hooks)) {
+    notes.push("⚠ settings.json hooks isn't an object — orchestrator hook not added, add it manually");
+    return notes;
+  }
   settings.hooks.SessionStart ??= [];
   const entries = settings.hooks.SessionStart;
   if (!Array.isArray(entries)) {

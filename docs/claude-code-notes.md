@@ -1,6 +1,6 @@
 # Claude Code notes
 
-Behaviour observed while building the worker agents and the orchestrator mode. Each line is what Claude Code did on the version named, checked with headless runs and hook logs, not a quote from its documentation. Recheck after an upgrade: the subagent model order has changed before.
+Behaviour observed while building the worker agents and the orchestrator mode. Each line was checked on the version named, against that version's docs and with headless runs and hook logs. Recheck after an upgrade: the subagent model order has changed before.
 
 ## Agents
 
