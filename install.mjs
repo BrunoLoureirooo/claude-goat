@@ -257,6 +257,10 @@ function mergeOrchestratorSettings(settings) {
       notes.push(`✓ settings.json → env.${key}=${value}`);
     }
   }
+  if (settings.agent !== "orchestrator") {
+    notes.push(`⚠ settings.json agent is set to ${JSON.stringify(settings.agent)}, not "orchestrator" — orchestrator hook not added`);
+    return notes;
+  }
   settings.hooks ??= {};
   if (typeof settings.hooks !== "object" || Array.isArray(settings.hooks)) {
     notes.push("⚠ settings.json hooks isn't an object — orchestrator hook not added, add it manually");
