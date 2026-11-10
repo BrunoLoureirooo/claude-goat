@@ -1,6 +1,6 @@
 # claude-goat
 
-Personal Claude Code setup, deployable to any machine in one command. Ships my global `CLAUDE.md` (universal preferences, loaded every session) and a small set of hand-written skills drawn from real daily work.
+Personal Claude Code setup, deployable to any machine in one command. Ships my global `CLAUDE.md` (universal preferences, loaded every session), a small set of hand-written skills drawn from real daily work, three model-tier worker agents and an orchestrator mode that delegates to them.
 
 ## Install
 
@@ -18,18 +18,21 @@ Why Node and not bash? Claude Code has Node as a hard runtime dependency, so any
 |---|---|---|
 | `global/CLAUDE.md` | `~/.claude/CLAUDE.md` | Existing file is backed up to `~/.claude/CLAUDE_bak.md` first, then overwritten |
 | `skills/*` | `~/.claude/skills/` | Merged in — skill folders that already exist are skipped, everything else already there is left alone |
+| `agents/*` | `~/.claude/agents/` | Same rule: an agent file that already exists is skipped. `haiku-worker`, `sonnet-worker`, `opus-worker`, plus `orchestrator` (see [Orchestrator mode](#orchestrator-mode)) |
+| `guidelines/orchestrator.md`, `hooks/orchestrator-brief.mjs` | `~/.claude/guidelines/`, `~/.claude/hooks/` | The orchestrator's directions and the SessionStart hook that hands them to each session; skipped if already there (`--no-orchestrator` to opt out) |
 | plugins (superpowers, typescript-lsp, security-guidance) | `claude plugin install` | Installed through the claude CLI from the official marketplace, skipped if already installed (`--no-plugins` to opt out) |
 | MCP servers (playwright, context7) | `claude mcp add --scope user` | Registered through the claude CLI, skipped if already registered (`--no-plugins` covers these too) |
 | `SETTINGS_PATCH` / `ENV_PATCH` in `install.mjs` | `~/.claude/settings.json` | Edited in place — only the listed keys are merged in, everything else already there (`enabledPlugins`, `theme`, your own `env` vars, …) is left alone. Invalid JSON is reported and left untouched rather than clobbered |
+| `ORCHESTRATOR_SETTINGS` / `ORCHESTRATOR_ENV` in `install.mjs` | `~/.claude/settings.json` | Filled in only when absent: `agent: "orchestrator"`, `env.CLAUDE_CODE_SUBAGENT_MODEL: "sonnet"`, `env.CLAUDE_CODE_FORK_SUBAGENT: "0"`; one `SessionStart` hook entry is appended unless an entry with the same command is already there, and only when `agent` is absent or already `"orchestrator"`. Existing hooks and keys are never removed or reordered (`--no-orchestrator` skips all of this) |
 
-Nothing else in `~/.claude/` is touched. Re-running is safe (idempotent, backup gets refreshed).
+Nothing else in `~/.claude/` is touched — only `CLAUDE.md` (+ its backup), `settings.json` and the `skills/`, `agents/`, `guidelines/` and `hooks/` folders. Re-running is safe (idempotent, backup gets refreshed).
 
 ## Install vs. init
 
 `install.mjs` does two independent jobs — global install (this table) and project init (next section) — runnable separately or together:
 
 ```bash
-node install.mjs --install   # only ~/.claude: CLAUDE.md, skills, plugins, MCPs, settings.json
+node install.mjs --install   # only ~/.claude: CLAUDE.md, skills, agents, plugins, MCPs, settings.json
 node install.mjs --init      # only the current directory: scaffold + interview
 node install.mjs             # let it decide (see below), or the packed file will ask you
 ```
@@ -48,6 +51,17 @@ With neither flag:
 - `env.ENABLE_STOP_REVIEW: "0"` — `security-guidance` otherwise runs an LLM diff review after every response, not just at commit/push. This disables just that per-turn pass; pattern-based warnings on edits and the LLM review at `git commit`/`git push` still run.
 - `playwright` MCP — the browser the global CLAUDE.md's Real Verification rule drives for UI work.
 - `context7` MCP — up-to-date library docs on demand, so scaffolded code isn't written against a stale training-cutoff API.
+
+## Orchestrator mode
+
+After the install (if `agent` wasn't already set), every interactive session runs as the `orchestrator` agent: the main thread plans, writes briefs, dispatches `haiku-worker`, `sonnet-worker` or `opus-worker` (cheapest tier that can do the job) and judges their reports, instead of reading and editing project files itself. The agent file has an empty body, so Claude Code's default system prompt stays; the directions it follows live in `~/.claude/guidelines/orchestrator.md` and reach the session through `hooks/orchestrator-brief.mjs` on startup, resume, `/clear` and compaction. Headless sessions (`claude -p`, the SDK) don't get them unless `ORCHESTRATOR_BRIEF_FORCE=1`. The hook is added only when `agent` is absent or already `"orchestrator"`; if it is set to anything else the installer prints a note and leaves the hook out, so the directions never reach sessions running as your own agent. The two env keys make subagents that name no model run on Sonnet rather than the main model, and turn off forks (which copy the main model and the whole conversation).
+
+- **Off switch:** `ORCHESTRATOR_BRIEF=off` in the environment skips the directions.
+- **One plain session:** `ORCHESTRATOR_BRIEF=off claude --agent claude` (PowerShell: `$env:ORCHESTRATOR_BRIEF="off"; claude --agent claude`, which lasts for that shell).
+- **Workers only:** `node install.mjs --no-orchestrator` installs the three workers and leaves the orchestrator agent, directions, hook and settings keys out.
+- **Undo:** delete `agent` and the `orchestrator-brief.mjs` `SessionStart` entry from `~/.claude/settings.json`; remove `env.CLAUDE_CODE_SUBAGENT_MODEL` and `env.CLAUDE_CODE_FORK_SUBAGENT` too if you want the old subagent defaults back.
+
+Behaviour this relies on, as observed on one Claude Code version: [docs/claude-code-notes.md](docs/claude-code-notes.md).
 
 ## Starting a new project
 
@@ -84,7 +98,7 @@ Tip: alias it — `alias claude-init='node ~/Projects/claude_configs/install.mjs
 node build.mjs    # → dist/claude-goat.mjs (~700 KB)
 ```
 
-Packs `install.mjs` plus the entire payload — global `CLAUDE.md`, all skills, all templates — into one self-contained file with a shebang. No repo, no dependencies, just Node (which is everywhere Claude Code is). Keep it in `~/bin`, a dotfiles repo, a USB stick, wherever:
+Packs `install.mjs` plus the entire payload — global `CLAUDE.md`, all skills, agents and templates, the orchestrator directions and hook — into one self-contained file with a shebang. No repo, no dependencies, just Node (which is everywhere Claude Code is). Keep it in `~/bin`, a dotfiles repo, a USB stick, wherever:
 
 ```bash
 cd my-new-project
@@ -103,14 +117,16 @@ An install is just "put the folder in the right place" — if you'd rather not r
 **macOS / Linux:**
 
 ```bash
-mkdir -p ~/.claude/skills && cp -r skills/* ~/.claude/skills/ && cp global/CLAUDE.md ~/.claude/CLAUDE.md
+mkdir -p ~/.claude/skills ~/.claude/agents ~/.claude/guidelines ~/.claude/hooks && cp -r skills/* ~/.claude/skills/ && cp agents/*.md ~/.claude/agents/ && cp guidelines/orchestrator.md ~/.claude/guidelines/ && cp hooks/orchestrator-brief.mjs ~/.claude/hooks/ && cp global/CLAUDE.md ~/.claude/CLAUDE.md
 ```
 
 **Windows PowerShell:**
 
 ```powershell
-mkdir "$HOME\.claude\skills" -Force; cp -r skills\* "$HOME\.claude\skills\"; cp global\CLAUDE.md "$HOME\.claude\CLAUDE.md"
+mkdir "$HOME\.claude\skills","$HOME\.claude\agents","$HOME\.claude\guidelines","$HOME\.claude\hooks" -Force; cp -r skills\* "$HOME\.claude\skills\"; cp agents\*.md "$HOME\.claude\agents\"; cp guidelines\orchestrator.md "$HOME\.claude\guidelines\"; cp hooks\orchestrator-brief.mjs "$HOME\.claude\hooks\"; cp global\CLAUDE.md "$HOME\.claude\CLAUDE.md"
 ```
+
+The copies overwrite what is there, and they don't edit `settings.json`: the orchestrator only switches on once `settings.json` has `"agent": "orchestrator"` and a `SessionStart` hook running `node <home>/.claude/hooks/orchestrator-brief.mjs` (copy only `agents/*-worker.md` if you want the workers alone).
 
 ## Layout
 
@@ -125,6 +141,17 @@ claude-goat/
 │   └── interview.md         # the prompt init-project hands to claude
 ├── global/
 │   └── CLAUDE.md            # personal global memory → ~/.claude/CLAUDE.md
+├── agents/
+│   ├── haiku-worker.md      # bounded, checkable work (no Edit/Write)
+│   ├── sonnet-worker.md     # the default worker: implementation, tests, scripts
+│   ├── opus-worker.md       # design, review, debugging, adversarial checks
+│   └── orchestrator.md      # empty-bodied main-thread agent → settings "agent"
+├── guidelines/
+│   └── orchestrator.md      # the orchestrator's directions → ~/.claude/guidelines/
+├── hooks/
+│   └── orchestrator-brief.mjs # SessionStart hook that injects those directions
+├── docs/
+│   └── claude-code-notes.md # Claude Code behaviour observed while building the above
 └── skills/
     ├── caveman/             # ultra-compressed output mode (~75% fewer tokens)
     ├── grill-with-docs/     # stress-test a plan against domain docs/ADRs

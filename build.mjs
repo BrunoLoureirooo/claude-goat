@@ -1,6 +1,6 @@
-// build.mjs — pack install.mjs + every payload file (global/, skills/, templates/) into
-// dist/claude-goat.mjs: one self-contained portable file. Drop it anywhere and run
-// `node claude-goat.mjs` (or `./claude-goat.mjs` — it's executable) from a project's root.
+// build.mjs — pack install.mjs + every payload file (global/, skills/, templates/, agents/,
+// guidelines/, hooks/) into dist/claude-goat.mjs: one self-contained portable file. Drop it
+// anywhere and run `node claude-goat.mjs` (or `./claude-goat.mjs` — it's executable) from a project's root.
 import { join, dirname, relative, sep } from "node:path";
 import { fileURLToPath } from "node:url";
 import { readdir, readFile, writeFile, mkdir, chmod } from "node:fs/promises";
@@ -30,6 +30,9 @@ async function collect(dir) {
 await collect("global");
 await collect("skills");
 await collect("templates");
+await collect("agents");
+await collect("guidelines");
+await collect("hooks");
 
 const payload = gzipSync(JSON.stringify(files), { level: 9 }).toString("base64");
 
