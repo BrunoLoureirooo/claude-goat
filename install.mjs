@@ -1,25 +1,28 @@
 // install.mjs — two independent jobs, runnable separately or together:
-//   install → global CLAUDE.md, skills, plugins, MCPs, settings.json patch → ~/.claude
+//   install → global CLAUDE.md, skills, agents, orchestrator directions + hook, plugins, MCPs,
+//             settings.json patch → ~/.claude
 //   init    → scaffolds CLAUDE.md + docs/ in the CURRENT directory, then launches Claude
 //             Code to interview you and fill them in
 //
 // Flags: --install (install only), --init (init only), --no-claude (init: skip the
-// interview launch), --no-plugins (install: skip plugin + MCP installs).
+// interview launch), --no-plugins (install: skip plugin + MCP installs), --no-orchestrator
+// (install: the three worker agents only — no orchestrator agent, directions, hook or its settings).
 // Pass neither --install nor --init and:
 //   - repo mode, run from the repo root            → install only
 //   - repo mode, run from elsewhere                 → both
 //   - packed (dist/claude-goat.mjs), interactive TTY → prompts you to choose
 //   - packed, non-interactive (piped/scripted)       → both
 //
-// Anything that already exists — a skill folder, a scaffold file — is skipped, never
-// overwritten. Exceptions: the global CLAUDE.md, which is backed up then refreshed, and
-// settings.json, which is edited in place (only SETTINGS_PATCH keys and ENV_PATCH env vars
-// are touched — everything else the user has in there, including enabledPlugins, is left alone).
+// Anything that already exists — a skill folder, an agent, the directions, the hook, a scaffold
+// file — is skipped, never overwritten. Exceptions: the global CLAUDE.md, which is backed up then
+// refreshed, and settings.json, which is edited in place (only SETTINGS_PATCH keys and ENV_PATCH
+// env vars are asserted; the orchestrator keys are only filled in when absent and its SessionStart
+// hook entry only appended once — everything else the user has in there is left alone).
 //
 // `node build.mjs` packs this script + all payload files into dist/claude-goat.mjs, a single
 // portable file that does the same thing anywhere without the repo.
 import { homedir } from "node:os";
-import { join, dirname } from "node:path";
+import { join, dirname, sep } from "node:path";
 import { fileURLToPath } from "node:url";
 import { cp, mkdir, readdir, access, copyFile, readFile, writeFile } from "node:fs/promises";
 import { spawnSync } from "node:child_process";
@@ -42,6 +45,7 @@ const targetMd = join(claudeDir, "CLAUDE.md");
 const project = process.cwd();
 const noClaude = process.argv.includes("--no-claude");
 const noPlugins = process.argv.includes("--no-plugins");
+const noOrchestrator = process.argv.includes("--no-orchestrator");
 const flagInstall = process.argv.includes("--install");
 const flagInit = process.argv.includes("--init");
 const winShell = process.platform === "win32";
@@ -64,6 +68,22 @@ const SETTINGS_PATCH = { effortLevel: "medium" };
 // env vars merged into settings.json's "env" object, alongside whatever the user already has
 const ENV_PATCH = { ENABLE_STOP_REVIEW: "0" }; // security-guidance: skip the per-turn Stop review
 
+// orchestrator mode: each key is set only when the user has none (never asserted over a choice)
+const ORCHESTRATOR_SETTINGS = { agent: "orchestrator" };
+const ORCHESTRATOR_ENV = { CLAUDE_CODE_SUBAGENT_MODEL: "sonnet", CLAUDE_CODE_FORK_SUBAGENT: "0" };
+// [source, destination relative to ~/.claude] — installed unless --no-orchestrator
+const ORCHESTRATOR_FILES = [
+  ["agents/orchestrator.md", join("agents", "orchestrator.md")],
+  ["guidelines/orchestrator.md", join("guidelines", "orchestrator.md")],
+  ["hooks/orchestrator-brief.mjs", join("hooks", "orchestrator-brief.mjs")],
+];
+const briefHook = join(claudeDir, "hooks", "orchestrator-brief.mjs");
+// forward slashes + double quotes work in cmd, PowerShell and Git Bash alike; POSIX gets single
+// quotes so a $ or ` in the home path is never expanded
+const BRIEF_COMMAND = winShell
+  ? `node "${briefHook.split(sep).join("/")}"`
+  : `node '${briefHook.replace(/'/g, "'\\''")}'`;
+
 // packed mode: a flat { "skills/x/SKILL.md": "content", ... } map instead of the repo on disk
 let files = null;
 if (EMBEDDED) {
@@ -85,6 +105,26 @@ async function skillNames() {
   }
   const entries = await readdir(join(here, "skills"), { withFileTypes: true });
   return entries.filter((d) => d.isDirectory()).map((d) => d.name);
+}
+
+// files directly under a payload folder, e.g. agents/*.md
+async function sourceFiles(dir) {
+  if (files) {
+    return Object.keys(files).filter((p) => p.startsWith(`${dir}/`) && !p.slice(dir.length + 1).includes("/")).map((p) => p.slice(dir.length + 1));
+  }
+  const entries = await readdir(join(here, dir), { withFileTypes: true });
+  return entries.filter((d) => d.isFile()).map((d) => d.name);
+}
+
+async function installFile(src, rel) {
+  const dest = join(claudeDir, rel);
+  if (await exists(dest)) {
+    console.log(`⚠ ${rel} already installed — skipped`);
+    return;
+  }
+  await mkdir(dirname(dest), { recursive: true });
+  await writeFile(dest, await readSource(src));
+  console.log(`✓ ${rel}`);
 }
 
 async function copySkill(name, dest) {
@@ -131,8 +171,10 @@ async function runInstall() {
   }
   if (settingsReadable) {
     settings = { ...settings, ...SETTINGS_PATCH, env: { ...(settings.env ?? {}), ...ENV_PATCH } };
+    const orchestratorNotes = noOrchestrator ? [] : mergeOrchestratorSettings(settings);
     await writeFile(settingsPath, JSON.stringify(settings, null, 2) + "\n");
     console.log(`✓ settings.json → effortLevel: ${SETTINGS_PATCH.effortLevel}, env.${Object.keys(ENV_PATCH)[0]}=${Object.values(ENV_PATCH)[0]}`);
+    for (const note of orchestratorNotes) console.log(note);
   }
 
   for (const name of await skillNames()) {
@@ -143,6 +185,14 @@ async function runInstall() {
     }
     await copySkill(name, dest);
     console.log(`✓ skill ${name}`);
+  }
+
+  for (const name of await sourceFiles("agents")) {
+    if (name === "orchestrator.md") continue; // part of ORCHESTRATOR_FILES
+    await installFile(`agents/${name}`, join("agents", name));
+  }
+  if (!noOrchestrator) {
+    for (const [src, rel] of ORCHESTRATOR_FILES) await installFile(src, rel);
   }
 
   // plugins (via the claude CLI; skipped if already installed)
@@ -185,6 +235,40 @@ async function runInstall() {
       }
     }
   }
+}
+
+// fills the orchestrator keys into settings (mutated in place) only where the user has none;
+// returns one report line per key
+function mergeOrchestratorSettings(settings) {
+  const notes = [];
+  for (const [key, value] of Object.entries(ORCHESTRATOR_SETTINGS)) {
+    if (key in settings) {
+      notes.push(`⚠ settings.json ${key} already set (${JSON.stringify(settings[key])}) — left alone`);
+    } else {
+      settings[key] = value;
+      notes.push(`✓ settings.json → ${key}: ${value}`);
+    }
+  }
+  for (const [key, value] of Object.entries(ORCHESTRATOR_ENV)) {
+    if (key in settings.env) {
+      notes.push(`⚠ settings.json env.${key} already set — left alone`);
+    } else {
+      settings.env[key] = value;
+      notes.push(`✓ settings.json → env.${key}=${value}`);
+    }
+  }
+  settings.hooks ??= {};
+  settings.hooks.SessionStart ??= [];
+  const entries = settings.hooks.SessionStart;
+  if (!Array.isArray(entries)) {
+    notes.push("⚠ settings.json hooks.SessionStart isn't a list — orchestrator hook not added, add it manually");
+  } else if (entries.some((e) => e?.hooks?.some?.((h) => h?.command === BRIEF_COMMAND))) {
+    notes.push("⚠ settings.json SessionStart orchestrator hook already present — skipped");
+  } else {
+    entries.push({ matcher: "startup|resume|clear|compact", hooks: [{ type: "command", command: BRIEF_COMMAND }] });
+    notes.push(`✓ settings.json → SessionStart hook: ${BRIEF_COMMAND}`);
+  }
+  return notes;
 }
 
 async function runInit() {
@@ -246,7 +330,7 @@ async function promptMode() {
   try {
     const answer = (await rl.question(
       "\nWhat do you want to run?\n" +
-      "  [1] install — global CLAUDE.md, skills, plugins, MCPs (~/.claude)\n" +
+      "  [1] install — global CLAUDE.md, skills, agents, plugins, MCPs (~/.claude)\n" +
       "  [2] init    — scaffold + interview this project only\n" +
       "  [3] both (default)\n" +
       "Choice [1/2/3]: "
