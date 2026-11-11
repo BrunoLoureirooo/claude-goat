@@ -1,5 +1,9 @@
-# repowise (local index + generated editor files)
-.repowise/
+# repowise (local index + generated editor files; config stays tracked)
+.repowise/*
+!.repowise/config.yaml
+!.repowise/health-rules.json
+!.repowise/policies.yaml
+!.repowise/teams.yaml
 .claude/CLAUDE.md
 .vscode/mcp.json
 .vscode/extensions.json

@@ -156,7 +156,8 @@ async function copySkill(name, dest) {
 
 
 // ── repowise: codebase index for agents (https://github.com/repowise-dev/repowise) ─────────────
-const REPOWISE_IGNORES = [".repowise/", ".claude/CLAUDE.md", ".vscode/mcp.json", ".vscode/extensions.json", ".github/copilot-instructions.md"];
+// the index (databases, caches) stays local; the small shareable config files are committed
+const REPOWISE_IGNORES = [".repowise/*", "!.repowise/config.yaml", "!.repowise/health-rules.json", "!.repowise/policies.yaml", "!.repowise/teams.yaml", ".claude/CLAUDE.md", ".vscode/mcp.json", ".vscode/extensions.json", ".github/copilot-instructions.md"];
 
 function hasCmd(cmd, args = ["--version"]) {
   const r = spawnSync(cmd, args, { encoding: "utf8", shell: winShell });
@@ -190,7 +191,7 @@ async function setupRepowise(project) {
   const current = (await exists(ignorePath)) ? await readFile(ignorePath, "utf8") : "";
   const missing = REPOWISE_IGNORES.filter((l) => !current.split(/\r?\n/).includes(l));
   if (missing.length) {
-    await writeFile(ignorePath, current + (current && !current.endsWith("\n") ? "\n" : "") + "# repowise (local index + generated editor files)\n" + missing.join("\n") + "\n");
+    await writeFile(ignorePath, current + (current && !current.endsWith("\n") ? "\n" : "") + "# repowise (local index + generated editor files; config stays tracked)\n" + missing.join("\n") + "\n");
     console.log(`✓ .gitignore → ${missing.join(", ")}`);
   }
 

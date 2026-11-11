@@ -59,7 +59,7 @@ With neither flag:
 
 - **Install:** `uv tool install repowise` (falls back to `pipx`; skipped with `--no-repowise`).
 - **Init (every new project):** `repowise init --yes --no-prose --no-distill-hook` creates the local `.repowise/` index. `--no-prose` makes no model calls and needs no key, so no code leaves the machine (add prose later with `repowise generate`). `--no-distill-hook` keeps repowise from rewriting what the agent reads (skeleton reads, compacted command output). It needs at least one commit; with none, the installer prints the command to run after the first commit.
-- **Kept out of git:** `.repowise/` and the machine-specific editor files repowise generates go in `.gitignore`.
+- **Kept out of git:** the index (`.repowise/*`: databases, caches, vector store) and the machine-specific editor files repowise generates go in `.gitignore`. The small shareable config (`.repowise/config.yaml`, plus `health-rules.json`, `policies.yaml`, `teams.yaml` if present) is un-ignored so it can be committed.
 - **Index freshness:** the index is local to each checkout, so CI cannot refresh it for you. repowise's post-commit hook (installed by `init`) covers your own commits; Claude Goat adds a `post-merge` hook (`templates/post-merge.sh`) that runs `repowise update --index-only` after pulls and merges of main.
 - **CI:** `.github/workflows/repowise.yml` runs repowise's gates (doc drift, security) on every pull request and push to main with a pinned release tag; no API key. Add `health`, `risk` or `coverage` to `checks:` when you want them.
 
