@@ -6,7 +6,9 @@
 //
 // Flags: --install (install only), --init (init only), --no-claude (init: skip the
 // interview launch), --no-plugins (install: skip plugin + MCP installs), --no-orchestrator
-// (install: the three worker agents only — no orchestrator agent, directions, hook or its settings).
+// (install: the worker agents only — no orchestrator agent, directions, hook or its settings),
+// --no-repowise (skip the repowise CLI install and, in init, the index; the CI workflow and
+// .gitignore lines are still written).
 // Pass neither --install nor --init and:
 //   - repo mode, run from the repo root            → install only
 //   - repo mode, run from elsewhere                 → both
@@ -24,7 +26,7 @@
 import { homedir } from "node:os";
 import { join, dirname, sep } from "node:path";
 import { fileURLToPath } from "node:url";
-import { cp, mkdir, readdir, access, copyFile, readFile, writeFile } from "node:fs/promises";
+import { cp, mkdir, readdir, access, copyFile, readFile, writeFile, chmod } from "node:fs/promises";
 import { spawnSync } from "node:child_process";
 import { createInterface as _createInterface } from "node:readline";
 
@@ -46,6 +48,7 @@ const project = process.cwd();
 const noClaude = process.argv.includes("--no-claude");
 const noPlugins = process.argv.includes("--no-plugins");
 const noOrchestrator = process.argv.includes("--no-orchestrator");
+const noRepowise = process.argv.includes("--no-repowise");
 const flagInstall = process.argv.includes("--install");
 const flagInit = process.argv.includes("--init");
 const winShell = process.platform === "win32";
@@ -150,6 +153,85 @@ async function copySkill(name, dest) {
   }
 }
 
+
+// ── repowise: codebase index for agents (https://github.com/repowise-dev/repowise) ─────────────
+const REPOWISE_IGNORES = [".repowise/", ".claude/CLAUDE.md", ".vscode/mcp.json", ".vscode/extensions.json", ".github/copilot-instructions.md"];
+
+function hasCmd(cmd, args = ["--version"]) {
+  const r = spawnSync(cmd, args, { encoding: "utf8", shell: winShell });
+  return !r.error && r.status === 0;
+}
+
+// installs the repowise CLI once (uv, else pipx); returns whether it is on PATH afterwards
+function ensureRepowise() {
+  if (hasCmd("repowise")) { console.log("⚠ repowise already installed — skipped"); return true; }
+  for (const [tool, args] of [["uv", ["tool", "install", "repowise"]], ["pipx", ["install", "repowise"]]]) {
+    if (!hasCmd(tool)) continue;
+    console.log(`→ installing repowise via ${tool}…`);
+    if (spawnSync(tool, args, { stdio: "inherit", shell: winShell }).status === 0 && hasCmd("repowise")) {
+      console.log("✓ repowise");
+      return true;
+    }
+  }
+  console.log("⚠ repowise not installed — need uv or pipx on PATH (e.g. brew install uv), then: uv tool install repowise");
+  return false;
+}
+
+// per-project: index with repowise (no model calls), keep it out of git, add the CI gates and the
+// post-merge hook. Idempotent; every step skips what exists.
+async function setupRepowise(project) {
+  const git = (...a) => spawnSync("git", a, { cwd: project, encoding: "utf8", shell: winShell });
+  const isRepo = git("rev-parse", "--git-dir").status === 0;
+  const hasCommit = isRepo && git("rev-parse", "--verify", "HEAD").status === 0;
+
+  // .gitignore: the index and the machine-specific editor files stay local
+  const ignorePath = join(project, ".gitignore");
+  const current = (await exists(ignorePath)) ? await readFile(ignorePath, "utf8") : "";
+  const missing = REPOWISE_IGNORES.filter((l) => !current.split(/\r?\n/).includes(l));
+  if (missing.length) {
+    await writeFile(ignorePath, current + (current && !current.endsWith("\n") ? "\n" : "") + "# repowise (local index + generated editor files)\n" + missing.join("\n") + "\n");
+    console.log(`✓ .gitignore → ${missing.join(", ")}`);
+  }
+
+  // CI gates
+  const wf = join(".github", "workflows", "repowise.yml");
+  if (await exists(join(project, wf))) {
+    console.log(`⚠ ${wf} already exists — skipped`);
+  } else {
+    await mkdir(join(project, ".github", "workflows"), { recursive: true });
+    await writeFile(join(project, wf), await readSource("templates/repowise.yml"));
+    console.log(`✓ ${wf}`);
+  }
+
+  if (noRepowise || !isRepo) { if (!isRepo) console.log("⚠ not a git repo — repowise index skipped (git init + commit, then: repowise init --yes --no-prose --no-distill-hook)"); return; }
+  if (!hasCmd("repowise")) { console.log("⚠ repowise CLI not on PATH — index skipped (install it, then: repowise init --yes --no-prose --no-distill-hook)"); return; }
+  if (!hasCommit) { console.log("⚠ no commits yet — repowise index skipped; after the first commit run: repowise init --yes --no-prose --no-distill-hook"); return; }
+
+  if (await exists(join(project, ".repowise", "state.json"))) {
+    console.log("⚠ .repowise already initialized — skipped");
+  } else {
+    // --no-prose: no model calls, no key, code never leaves the machine; --no-distill-hook: don't
+    // rewrite what the agent reads (skeleton reads, compacted command output)
+    console.log("→ repowise init (graph, git, health, dead code; no model calls)…");
+    const r = spawnSync("repowise", ["init", "--yes", "--no-prose", "--no-distill-hook"], { cwd: project, stdio: "inherit", shell: winShell });
+    console.log(r.status === 0 ? "✓ .repowise" : "⚠ repowise init failed — run it by hand to see why");
+  }
+
+  // post-merge hook (post-commit is installed by repowise init); marker-delimited so it coexists
+  const hookPath = join(project, ".git", "hooks", "post-merge");
+  const marker = "repowise-merge-hook-start";
+  const body = await readSource("templates/post-merge.sh");
+  const existing = (await exists(hookPath)) ? await readFile(hookPath, "utf8") : "";
+  if (existing.includes(marker)) {
+    console.log("⚠ post-merge hook already installed — skipped");
+  } else {
+    await mkdir(dirname(hookPath), { recursive: true });
+    await writeFile(hookPath, existing ? existing.replace(/\s*$/, "\n") + body.replace(/^#!.*\n/, "") : body);
+    await chmod(hookPath, 0o755);
+    console.log("✓ .git/hooks/post-merge");
+  }
+}
+
 async function runInstall() {
   if (!files && !(await exists(join(here, "skills")))) {
     console.error("✗ can't find ./skills next to install.mjs — the repo is incomplete");
@@ -206,6 +288,8 @@ async function runInstall() {
   if (!noOrchestrator) {
     for (const [src, rel] of ORCHESTRATOR_FILES) await installFile(src, rel);
   }
+
+  if (!noRepowise) ensureRepowise();
 
   // plugins (via the claude CLI; skipped if already installed)
   if (!noPlugins && PLUGINS.length > 0) {
@@ -319,6 +403,8 @@ async function runInit() {
     console.log(`✓ ${dest}`);
     created++;
   }
+
+  await setupRepowise(project);
 
   if (created === 0) {
     console.log("\n→ project already initialized — nothing scaffolded.");

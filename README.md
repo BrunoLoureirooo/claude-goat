@@ -23,6 +23,7 @@ Why Node and not bash? Claude Code has Node as a hard runtime dependency, so any
 | plugins (superpowers, typescript-lsp, security-guidance) | `claude plugin install` | Installed through the claude CLI from the official marketplace, skipped if already installed (`--no-plugins` to opt out) |
 | MCP servers (playwright, context7) | `claude mcp add --scope user` | Registered through the claude CLI, skipped if already registered (`--no-plugins` covers these too) |
 | `SETTINGS_PATCH` / `ENV_PATCH` in `install.mjs` | `~/.claude/settings.json` | Edited in place — only the listed keys are merged in, everything else already there (`enabledPlugins`, `theme`, your own `env` vars, …) is left alone. Invalid JSON is reported and left untouched rather than clobbered |
+| repowise (`ensureRepowise` / `setupRepowise` in `install.mjs`) | `uv tool install`, per-project `.repowise/`, `.github/workflows/repowise.yml`, `.git/hooks/post-merge` | See [Repowise](#repowise). Also edits `~/.claude/settings.json` and `~/.claude.json` (MCP entry and hooks) via `repowise init` |
 | `ORCHESTRATOR_SETTINGS` / `ORCHESTRATOR_ENV` in `install.mjs` | `~/.claude/settings.json` | Filled in only when absent: `agent: "orchestrator"`, `env.CLAUDE_CODE_FORK_SUBAGENT: "0"`; one `SessionStart` hook entry is appended unless an entry with the same command is already there, and only when `agent` is absent or already `"orchestrator"`. Existing hooks and keys are never removed or reordered (`--no-orchestrator` skips all of this) |
 
 Nothing else in `~/.claude/` is touched — only `CLAUDE.md` (+ its backup), `settings.json` and the `skills/`, `agents/`, `guidelines/` and `hooks/` folders. Re-running is safe (idempotent, backup gets refreshed).
@@ -51,6 +52,16 @@ With neither flag:
 - `env.ENABLE_STOP_REVIEW: "0"` — `security-guidance` otherwise runs an LLM diff review after every response, not just at commit/push. This disables just that per-turn pass; pattern-based warnings on edits and the LLM review at `git commit`/`git push` still run.
 - `playwright` MCP — the browser the global CLAUDE.md's Real Verification rule drives for UI work.
 - `context7` MCP — up-to-date library docs on demand, so scaffolded code isn't written against a stale training-cutoff API.
+
+## Repowise
+
+[Repowise](https://github.com/repowise-dev/repowise) indexes a repo (dependency graph, git history, hotspots, dead code, health, decisions) and serves it to agents over MCP. Claude Goat wires it in:
+
+- **Install:** `uv tool install repowise` (falls back to `pipx`; skipped with `--no-repowise`).
+- **Init (every new project):** `repowise init --yes --no-prose --no-distill-hook` creates the local `.repowise/` index. `--no-prose` makes no model calls and needs no key, so no code leaves the machine (add prose later with `repowise generate`). `--no-distill-hook` keeps repowise from rewriting what the agent reads (skeleton reads, compacted command output). It needs at least one commit; with none, the installer prints the command to run after the first commit.
+- **Kept out of git:** `.repowise/` and the machine-specific editor files repowise generates go in `.gitignore`.
+- **Index freshness:** the index is local to each checkout, so CI cannot refresh it for you. repowise's post-commit hook (installed by `init`) covers your own commits; Claude Goat adds a `post-merge` hook (`templates/post-merge.sh`) that runs `repowise update --index-only` after pulls and merges of main.
+- **CI:** `.github/workflows/repowise.yml` runs repowise's gates (doc drift, security) on every pull request and push to main with a pinned release tag; no API key. Add `health`, `risk` or `coverage` to `checks:` when you want them.
 
 ## Local LLM
 

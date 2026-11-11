@@ -1,0 +1,6 @@
+# repowise (local index + generated editor files)
+.repowise/
+.claude/CLAUDE.md
+.vscode/mcp.json
+.vscode/extensions.json
+.github/copilot-instructions.md
