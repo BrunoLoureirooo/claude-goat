@@ -6,7 +6,9 @@
 //
 // Flags: --install (install only), --init (init only), --no-claude (init: skip the
 // interview launch), --no-plugins (install: skip plugin + MCP installs), --no-orchestrator
-// (install: the three worker agents only — no orchestrator agent, directions, hook or its settings).
+// (install: the worker agents only — no orchestrator agent, directions, hook or its settings),
+// --no-repowise (skip the repowise CLI install and, in init, the index; the CI workflow and
+// .gitignore lines are still written).
 // Pass neither --install nor --init and:
 //   - repo mode, run from the repo root            → install only
 //   - repo mode, run from elsewhere                 → both
@@ -22,9 +24,9 @@
 // `node build.mjs` packs this script + all payload files into dist/claude-goat.mjs, a single
 // portable file that does the same thing anywhere without the repo.
 import { homedir } from "node:os";
-import { join, dirname, sep } from "node:path";
+import { join, dirname, sep, delimiter } from "node:path";
 import { fileURLToPath } from "node:url";
-import { cp, mkdir, readdir, access, copyFile, readFile, writeFile } from "node:fs/promises";
+import { cp, mkdir, readdir, access, copyFile, readFile, writeFile, chmod } from "node:fs/promises";
 import { spawnSync } from "node:child_process";
 import { createInterface as _createInterface } from "node:readline";
 
@@ -46,6 +48,7 @@ const project = process.cwd();
 const noClaude = process.argv.includes("--no-claude");
 const noPlugins = process.argv.includes("--no-plugins");
 const noOrchestrator = process.argv.includes("--no-orchestrator");
+const noRepowise = process.argv.includes("--no-repowise");
 const flagInstall = process.argv.includes("--install");
 const flagInit = process.argv.includes("--init");
 const winShell = process.platform === "win32";
@@ -64,18 +67,27 @@ const MCPS = [
 ];
 
 // top-level settings.json keys asserted on every run (merged in, not replaced wholesale)
-const SETTINGS_PATCH = { effortLevel: "medium" };
+const SETTINGS_PATCH = { model: "opus", effortLevel: "high" };
+// per-model overrides merged into settings.json's "modelSettings" (every Claude 5.5 tier, same values)
+const MODEL_IDS = ["claude-opus-5-5", "claude-sonnet-5-5", "claude-haiku-5-5"];
+const MODEL_SETTINGS_PATCH = { effortLevel: "high", autoCompactWindow: 300000 };
 // env vars merged into settings.json's "env" object, alongside whatever the user already has
-const ENV_PATCH = { ENABLE_STOP_REVIEW: "0" }; // security-guidance: skip the per-turn Stop review
+const ENV_PATCH = { ENABLE_STOP_REVIEW: "0", CLAUDE_CODE_SUBAGENT_MODEL: "haiku" }; // haiku: subagents that name no model // security-guidance: skip the per-turn Stop review
 
 // orchestrator mode: each key is set only when the user has none (never asserted over a choice)
 const ORCHESTRATOR_SETTINGS = { agent: "orchestrator" };
-const ORCHESTRATOR_ENV = { CLAUDE_CODE_SUBAGENT_MODEL: "sonnet", CLAUDE_CODE_FORK_SUBAGENT: "0" };
+const ORCHESTRATOR_ENV = { CLAUDE_CODE_FORK_SUBAGENT: "0" };
 // [source, destination relative to ~/.claude] — installed unless --no-orchestrator
 const ORCHESTRATOR_FILES = [
   ["agents/orchestrator.md", join("agents", "orchestrator.md")],
   ["guidelines/orchestrator.md", join("guidelines", "orchestrator.md")],
   ["hooks/orchestrator-brief.mjs", join("hooks", "orchestrator-brief.mjs")],
+  ["guidelines/orchestrator-local.md", join("guidelines", "orchestrator-local.md")],
+];
+// the local-LLM relay script that agents/local-worker.md calls — installed always
+const LOCAL_FILES = [
+  ["bin/local-llm.mjs", join("bin", "local-llm.mjs")],
+  ["bin/local-llm.json", "local-llm.json"], // tier → model map; edit to match what's pulled on the box
 ];
 const briefHook = join(claudeDir, "hooks", "orchestrator-brief.mjs");
 // forward slashes + double quotes work in cmd, PowerShell and Git Bash alike; POSIX gets single
@@ -141,6 +153,104 @@ async function copySkill(name, dest) {
   }
 }
 
+
+// ── repowise: codebase index for agents (https://github.com/repowise-dev/repowise) ─────────────
+// the index (databases, caches) stays local; the small shareable config files are committed
+const REPOWISE_IGNORES = [".repowise/*", "!.repowise/config.yaml", "!.repowise/decisions.yaml", "!.repowise/health-rules.json", "!.repowise/policies.yaml", "!.repowise/teams.yaml", ".claude/CLAUDE.md", ".vscode/mcp.json", ".vscode/extensions.json", ".github/copilot-instructions.md"];
+
+function hasCmd(cmd, args = ["--version"]) {
+  const r = spawnSync(cmd, args, { encoding: "utf8", shell: winShell });
+  return !r.error && r.status === 0;
+}
+
+// uv is how repowise gets installed; install it when neither uv nor pipx is present
+function ensureUv() {
+  if (hasCmd("uv") || hasCmd("pipx")) return;
+  console.log("→ uv not found — installing it…");
+  const attempts = winShell
+    ? [["powershell", ["-ExecutionPolicy", "ByPass", "-c", "irm https://astral.sh/uv/install.ps1 | iex"]]]
+    : [...(hasCmd("brew") ? [["brew", ["install", "uv"]]] : []), ["sh", ["-c", "curl -LsSf https://astral.sh/uv/install.sh | sh"]]];
+  for (const [cmd, args] of attempts) {
+    if (spawnSync(cmd, args, { stdio: "inherit", shell: winShell }).status !== 0) continue;
+    // the standalone installer puts uv in ~/.local/bin (or ~/.cargo/bin), which this process may not have on PATH yet
+    process.env.PATH = [join(homedir(), ".local", "bin"), join(homedir(), ".cargo", "bin"), process.env.PATH].join(delimiter);
+    if (hasCmd("uv")) { console.log("✓ uv"); return; }
+  }
+  console.log("⚠ couldn't install uv — see https://docs.astral.sh/uv/getting-started/installation/");
+}
+
+// installs the repowise CLI once (uv, else pipx); returns whether it is on PATH afterwards
+function ensureRepowise() {
+  process.env.PATH = [join(homedir(), ".local", "bin"), process.env.PATH].join(delimiter); // where uv/pipx put tools
+  if (hasCmd("repowise")) { console.log("⚠ repowise already installed — skipped"); return true; }
+  ensureUv();
+  for (const [tool, args] of [["uv", ["tool", "install", "repowise"]], ["pipx", ["install", "repowise"]]]) {
+    if (!hasCmd(tool)) continue;
+    console.log(`→ installing repowise via ${tool}…`);
+    if (spawnSync(tool, args, { stdio: "inherit", shell: winShell }).status === 0 && hasCmd("repowise")) {
+      console.log("✓ repowise");
+      return true;
+    }
+  }
+  console.log("⚠ repowise not installed — install uv (https://docs.astral.sh/uv/), then: uv tool install repowise");
+  return false;
+}
+
+// appends a marker-delimited hook script to .git/hooks/<name> (creating it if needed); idempotent
+async function installHook(project, name, marker, template) {
+  const hookPath = join(project, ".git", "hooks", name);
+  const existing = (await exists(hookPath)) ? await readFile(hookPath, "utf8") : "";
+  if (existing.includes(marker)) { console.log(`⚠ ${name} hook already installed — skipped`); return; }
+  const body = await readSource(template);
+  await mkdir(dirname(hookPath), { recursive: true });
+  await writeFile(hookPath, existing ? existing.replace(/\s*$/, "\n") + body.replace(/^#!.*\n/, "") : body);
+  await chmod(hookPath, 0o755);
+  console.log(`✓ .git/hooks/${name} (${marker.replace("-start", "")})`);
+}
+
+// per-project: index with repowise (no model calls), keep it out of git, add the CI gates and the
+// post-merge hook. Idempotent; every step skips what exists.
+async function setupRepowise(project) {
+  const git = (...a) => spawnSync("git", a, { cwd: project, encoding: "utf8", shell: winShell });
+  const isRepo = git("rev-parse", "--git-dir").status === 0;
+  const hasCommit = isRepo && git("rev-parse", "--verify", "HEAD").status === 0;
+
+  // .gitignore: the index and the machine-specific editor files stay local
+  const ignorePath = join(project, ".gitignore");
+  const current = (await exists(ignorePath)) ? await readFile(ignorePath, "utf8") : "";
+  const missing = REPOWISE_IGNORES.filter((l) => !current.split(/\r?\n/).includes(l));
+  if (missing.length) {
+    await writeFile(ignorePath, current + (current && !current.endsWith("\n") ? "\n" : "") + "# repowise (local index + generated editor files; config stays tracked)\n" + missing.join("\n") + "\n");
+    console.log(`✓ .gitignore → ${missing.join(", ")}`);
+  }
+
+  // CI gates
+  const wf = join(".github", "workflows", "repowise.yml");
+  if (await exists(join(project, wf))) {
+    console.log(`⚠ ${wf} already exists — skipped`);
+  } else {
+    await mkdir(join(project, ".github", "workflows"), { recursive: true });
+    await writeFile(join(project, wf), await readSource("templates/repowise.yml"));
+    console.log(`✓ ${wf}`);
+  }
+
+  if (noRepowise) return;
+  if (!isRepo) { console.log("⚠ not a git repo — repowise index and hooks skipped (git init, then re-run init)"); return; }
+
+  // hooks first, so the index is built as soon as possible even when it can't be now: the
+  // bootstrap post-commit hook builds it on the first commit (no-op once built), post-merge
+  // refreshes it after pulls. Marker-delimited, so they coexist with other hooks and with
+  // repowise's own post-commit hook.
+  await installHook(project, "post-commit", "repowise-bootstrap-start", "templates/post-commit-bootstrap.sh");
+  await installHook(project, "post-merge", "repowise-merge-hook-start", "templates/post-merge.sh");
+
+  // no immediate init: with the hooks in place, the index is built by the first commit made after
+  // this (the bootstrap hook runs `repowise init --yes --no-prose --no-distill-hook` in the
+  // background), so project setup stays fast and the index reflects the code at that point
+  if (await exists(join(project, ".repowise", "state.json"))) console.log("⚠ .repowise already initialized — skipped");
+  else console.log("→ repowise index: will be built automatically on the next commit (or now: repowise init --yes --no-prose --no-distill-hook)");
+}
+
 async function runInstall() {
   if (!files && !(await exists(join(here, "skills")))) {
     console.error("✗ can't find ./skills next to install.mjs — the repo is incomplete");
@@ -170,10 +280,12 @@ async function runInstall() {
     }
   }
   if (settingsReadable) {
-    settings = { ...settings, ...SETTINGS_PATCH, env: { ...(settings.env ?? {}), ...ENV_PATCH } };
+    const modelSettings = { ...(settings.modelSettings ?? {}) };
+    for (const id of MODEL_IDS) modelSettings[id] = { ...(modelSettings[id] ?? {}), ...MODEL_SETTINGS_PATCH };
+    settings = { ...settings, ...SETTINGS_PATCH, modelSettings, env: { ...(settings.env ?? {}), ...ENV_PATCH } };
     const orchestratorNotes = noOrchestrator ? [] : mergeOrchestratorSettings(settings);
     await writeFile(settingsPath, JSON.stringify(settings, null, 2) + "\n");
-    console.log(`✓ settings.json → effortLevel: ${SETTINGS_PATCH.effortLevel}, env.${Object.keys(ENV_PATCH)[0]}=${Object.values(ENV_PATCH)[0]}`);
+    console.log(`✓ settings.json → model: ${SETTINGS_PATCH.model}, effortLevel: ${SETTINGS_PATCH.effortLevel}, autoCompactWindow: ${MODEL_SETTINGS_PATCH.autoCompactWindow} (all models), env.CLAUDE_CODE_SUBAGENT_MODEL=${ENV_PATCH.CLAUDE_CODE_SUBAGENT_MODEL}`);
     for (const note of orchestratorNotes) console.log(note);
   }
 
@@ -191,9 +303,12 @@ async function runInstall() {
     if (name === "orchestrator.md") continue; // part of ORCHESTRATOR_FILES
     await installFile(`agents/${name}`, join("agents", name));
   }
+  for (const [src, rel] of LOCAL_FILES) await installFile(src, rel);
   if (!noOrchestrator) {
     for (const [src, rel] of ORCHESTRATOR_FILES) await installFile(src, rel);
   }
+
+  if (!noRepowise) ensureRepowise();
 
   // plugins (via the claude CLI; skipped if already installed)
   if (!noPlugins && PLUGINS.length > 0) {
@@ -307,6 +422,8 @@ async function runInit() {
     console.log(`✓ ${dest}`);
     created++;
   }
+
+  await setupRepowise(project);
 
   if (created === 0) {
     console.log("\n→ project already initialized — nothing scaffolded.");
