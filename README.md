@@ -181,3 +181,7 @@ claude-goat/
 ## Verifying it loaded
 
 Inside a Claude Code session, `/memory` shows which instruction files are active — the global `CLAUDE.md` should be listed. To see a skill fire, describe a matching task (e.g. "add an EF Core entity for invoices") and watch it pick up `/caveman`.
+
+## Future: outgrowing Node?
+
+**Reminder:** the installer started as a copy-files script and has grown into machine provisioning. It now installs CLIs (uv, repowise), merges and asserts `settings.json` keys, writes per-project git hooks and CI workflows, and probes a local model server. That is a lot of hand-written imperative Node, with its own idempotency checks and a packed single-file build. Once it grows further, consider migrating to a configuration-management tool such as Ansible: declarative, idempotent-by-design tasks and roles for the machine setup (CLIs, settings, hooks, the local-LLM config), with the project scaffold kept as templates. The cost is requiring Ansible (Python) on every machine instead of "just Node", so the portable single file would go. Worth deciding before adding another provisioning feature.
