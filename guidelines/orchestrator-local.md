@@ -12,6 +12,10 @@ Send the work to `local-worker` (a cheap Haiku relay that drives the local model
 
 You do the planning yourself: read the user's request, break it into bounded tasks, and write each brief with exact paths, done criteria and a command that proves it (test, build, grep). Independent tasks can run in parallel, but the box serves one large model at a time, so do not fan out several `large` edits at once.
 
+## Proof of local work
+
+A `local-worker` report counts only if it starts with a `[model: …]` line from the local command. A report without it, or one where the worker read or wrote files itself, is a failed attempt: do not accept its content as local output, and count it toward the two-attempt limit.
+
 ## Checking local work
 
 Local output is unverified. Do not accept "done" from a local worker: have the next local `small` + `explore` worker run the done-criteria command and read the diff (`git diff`), and judge from that report. Check the result, not the confidence.

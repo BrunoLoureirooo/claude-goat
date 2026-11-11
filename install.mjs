@@ -24,7 +24,7 @@
 // `node build.mjs` packs this script + all payload files into dist/claude-goat.mjs, a single
 // portable file that does the same thing anywhere without the repo.
 import { homedir } from "node:os";
-import { join, dirname, sep } from "node:path";
+import { join, dirname, sep, delimiter } from "node:path";
 import { fileURLToPath } from "node:url";
 import { cp, mkdir, readdir, access, copyFile, readFile, writeFile, chmod } from "node:fs/promises";
 import { spawnSync } from "node:child_process";
@@ -163,9 +163,27 @@ function hasCmd(cmd, args = ["--version"]) {
   return !r.error && r.status === 0;
 }
 
+// uv is how repowise gets installed; install it when neither uv nor pipx is present
+function ensureUv() {
+  if (hasCmd("uv") || hasCmd("pipx")) return;
+  console.log("→ uv not found — installing it…");
+  const attempts = winShell
+    ? [["powershell", ["-ExecutionPolicy", "ByPass", "-c", "irm https://astral.sh/uv/install.ps1 | iex"]]]
+    : [...(hasCmd("brew") ? [["brew", ["install", "uv"]]] : []), ["sh", ["-c", "curl -LsSf https://astral.sh/uv/install.sh | sh"]]];
+  for (const [cmd, args] of attempts) {
+    if (spawnSync(cmd, args, { stdio: "inherit", shell: winShell }).status !== 0) continue;
+    // the standalone installer puts uv in ~/.local/bin (or ~/.cargo/bin), which this process may not have on PATH yet
+    process.env.PATH = [join(homedir(), ".local", "bin"), join(homedir(), ".cargo", "bin"), process.env.PATH].join(delimiter);
+    if (hasCmd("uv")) { console.log("✓ uv"); return; }
+  }
+  console.log("⚠ couldn't install uv — see https://docs.astral.sh/uv/getting-started/installation/");
+}
+
 // installs the repowise CLI once (uv, else pipx); returns whether it is on PATH afterwards
 function ensureRepowise() {
+  process.env.PATH = [join(homedir(), ".local", "bin"), process.env.PATH].join(delimiter); // where uv/pipx put tools
   if (hasCmd("repowise")) { console.log("⚠ repowise already installed — skipped"); return true; }
+  ensureUv();
   for (const [tool, args] of [["uv", ["tool", "install", "repowise"]], ["pipx", ["install", "repowise"]]]) {
     if (!hasCmd(tool)) continue;
     console.log(`→ installing repowise via ${tool}…`);
@@ -174,8 +192,20 @@ function ensureRepowise() {
       return true;
     }
   }
-  console.log("⚠ repowise not installed — need uv or pipx on PATH (e.g. brew install uv), then: uv tool install repowise");
+  console.log("⚠ repowise not installed — install uv (https://docs.astral.sh/uv/), then: uv tool install repowise");
   return false;
+}
+
+// appends a marker-delimited hook script to .git/hooks/<name> (creating it if needed); idempotent
+async function installHook(project, name, marker, template) {
+  const hookPath = join(project, ".git", "hooks", name);
+  const existing = (await exists(hookPath)) ? await readFile(hookPath, "utf8") : "";
+  if (existing.includes(marker)) { console.log(`⚠ ${name} hook already installed — skipped`); return; }
+  const body = await readSource(template);
+  await mkdir(dirname(hookPath), { recursive: true });
+  await writeFile(hookPath, existing ? existing.replace(/\s*$/, "\n") + body.replace(/^#!.*\n/, "") : body);
+  await chmod(hookPath, 0o755);
+  console.log(`✓ .git/hooks/${name} (${marker.replace("-start", "")})`);
 }
 
 // per-project: index with repowise (no model calls), keep it out of git, add the CI gates and the
@@ -204,33 +234,21 @@ async function setupRepowise(project) {
     console.log(`✓ ${wf}`);
   }
 
-  if (noRepowise || !isRepo) { if (!isRepo) console.log("⚠ not a git repo — repowise index skipped (git init + commit, then: repowise init --yes --no-prose --no-distill-hook)"); return; }
-  if (!hasCmd("repowise")) { console.log("⚠ repowise CLI not on PATH — index skipped (install it, then: repowise init --yes --no-prose --no-distill-hook)"); return; }
-  if (!hasCommit) { console.log("⚠ no commits yet — repowise index skipped; after the first commit run: repowise init --yes --no-prose --no-distill-hook"); return; }
+  if (noRepowise) return;
+  if (!isRepo) { console.log("⚠ not a git repo — repowise index and hooks skipped (git init, then re-run init)"); return; }
 
-  if (await exists(join(project, ".repowise", "state.json"))) {
-    console.log("⚠ .repowise already initialized — skipped");
-  } else {
-    // --no-prose: no model calls, no key, code never leaves the machine; --no-distill-hook: don't
-    // rewrite what the agent reads (skeleton reads, compacted command output)
-    console.log("→ repowise init (graph, git, health, dead code; no model calls)…");
-    const r = spawnSync("repowise", ["init", "--yes", "--no-prose", "--no-distill-hook"], { cwd: project, stdio: "inherit", shell: winShell });
-    console.log(r.status === 0 ? "✓ .repowise" : "⚠ repowise init failed — run it by hand to see why");
-  }
+  // hooks first, so the index is built as soon as possible even when it can't be now: the
+  // bootstrap post-commit hook builds it on the first commit (no-op once built), post-merge
+  // refreshes it after pulls. Marker-delimited, so they coexist with other hooks and with
+  // repowise's own post-commit hook.
+  await installHook(project, "post-commit", "repowise-bootstrap-start", "templates/post-commit-bootstrap.sh");
+  await installHook(project, "post-merge", "repowise-merge-hook-start", "templates/post-merge.sh");
 
-  // post-merge hook (post-commit is installed by repowise init); marker-delimited so it coexists
-  const hookPath = join(project, ".git", "hooks", "post-merge");
-  const marker = "repowise-merge-hook-start";
-  const body = await readSource("templates/post-merge.sh");
-  const existing = (await exists(hookPath)) ? await readFile(hookPath, "utf8") : "";
-  if (existing.includes(marker)) {
-    console.log("⚠ post-merge hook already installed — skipped");
-  } else {
-    await mkdir(dirname(hookPath), { recursive: true });
-    await writeFile(hookPath, existing ? existing.replace(/\s*$/, "\n") + body.replace(/^#!.*\n/, "") : body);
-    await chmod(hookPath, 0o755);
-    console.log("✓ .git/hooks/post-merge");
-  }
+  // no immediate init: with the hooks in place, the index is built by the first commit made after
+  // this (the bootstrap hook runs `repowise init --yes --no-prose --no-distill-hook` in the
+  // background), so project setup stays fast and the index reflects the code at that point
+  if (await exists(join(project, ".repowise", "state.json"))) console.log("⚠ .repowise already initialized — skipped");
+  else console.log("→ repowise index: will be built automatically on the next commit (or now: repowise init --yes --no-prose --no-distill-hook)");
 }
 
 async function runInstall() {

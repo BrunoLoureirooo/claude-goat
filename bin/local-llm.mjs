@@ -4,13 +4,18 @@
 //   node local-llm.mjs [--tier small|medium|large] [--system "text"] [--max N] ["prompt" | < stdin]
 //        one chat completion; prints the reply. A tier whose model isn't installed falls back to the
 //        next larger installed tier (the model actually used is reported on stderr).
+//   node local-llm.mjs --run explore|edit --dir DIR [--tier T] ["task" | < stdin]
+//        runs opencode (a tool-using agent) on the tier's local model inside DIR: explore = opencode's
+//        read-only "plan" agent, edit = full file tools. Registers the model through inline config
+//        (your opencode.json is not touched) and prints the model used and, for edit, `git diff --stat`.
 //   node local-llm.mjs --probe [--timeout S]   prints JSON {up, url, tiers:{tier:model|null}} ; exit 0 if up, 1 if not
 //   node local-llm.mjs --resolve <tier>        prints the model name that tier resolves to (for opencode -m ollama/<name>)
 //   node local-llm.mjs --pull <tier>           asks the box to download that tier's configured model
 //
 // Config: ~/.claude/local-llm.json  { "url": ".../v1", "tiers": { "large": "...", "medium": "...", "small": "..." } }
 // Env overrides: LOCAL_LLM_URL, LOCAL_LLM_MODEL (forces one model for every tier), LOCAL_LLM_TIMEOUT_S (default 300)
-import { readFileSync } from "node:fs";
+import { readFileSync, existsSync } from "node:fs";
+import { spawnSync } from "node:child_process";
 import { homedir } from "node:os";
 import { join } from "node:path";
 
@@ -83,11 +88,35 @@ if (flag("--resolve") || flag("--pull")) {
 
 let system = val("--system") || "";
 const maxTokens = Number(val("--max")) || 4096;
-const skip = new Set(["--tier", "--system", "--max", "--timeout"]);
+const skip = new Set(["--tier", "--system", "--max", "--timeout", "--run", "--dir"]);
 const rest = argv.filter((a, i) => !a.startsWith("--") && !skip.has(argv[i - 1]));
 let prompt = rest.join(" ");
 if (!prompt && !process.stdin.isTTY) prompt = readFileSync(0, "utf8");
 if (!prompt.trim()) fail("empty prompt (pass it as an argument or on stdin)");
+
+if (flag("--run")) {
+  const mode = val("--run");
+  if (!["explore", "edit"].includes(mode)) fail('--run takes "explore" or "edit"');
+  const dir = val("--dir");
+  if (!dir || !existsSync(dir)) fail("--dir must be an existing directory (the repo or worktree to work in)");
+  let model;
+  try { model = resolve(tier, forced ? new Set() : await installed()); } catch (e) { fail(`box unreachable (${e.message})`); }
+  if (!model) fail(`no installed model for tier ${tier} or above`);
+  const models = Object.fromEntries([...new Set([model, ...Object.values(cfg.tiers)])].map((m) => [m, { name: m }]));
+  const inline = { provider: { ollama: { npm: "@ai-sdk/openai-compatible", name: "Ollama (Tailnet)", options: { baseURL: url }, models } } };
+  const bin = existsSync(join(homedir(), ".opencode", "bin", "opencode")) ? join(homedir(), ".opencode", "bin", "opencode") : "opencode";
+  const args = ["run", "-m", `ollama/${model}`, ...(mode === "explore" ? ["--agent", "plan"] : []), "--dir", dir, prompt];
+  console.error(`local-llm: opencode ${mode} on ${model} (tier ${tier}) in ${dir}`);
+  const r = spawnSync(bin, args, { cwd: dir, encoding: "utf8", input: "", timeout: timeoutS * 1000, maxBuffer: 64 << 20, env: { ...process.env, OPENCODE_CONFIG_CONTENT: JSON.stringify(inline) } });
+  if (r.error) fail(`opencode failed to run: ${r.error.message}`);
+  process.stdout.write(`[model: ${model}] [mode: ${mode}]\n${r.stdout}`);
+  if (r.stderr?.trim()) console.error(r.stderr.trim().split("\n").slice(-5).join("\n"));
+  if (mode === "edit") {
+    const d = spawnSync("git", ["status", "--short"], { cwd: dir, encoding: "utf8" });
+    process.stdout.write(`\n[git status in ${dir}]\n${d.stdout || "(clean)\n"}`);
+  }
+  process.exit(r.status === 0 ? 0 : 1);
+}
 
 try {
   const model = resolve(tier, forced ? new Set() : await installed());
