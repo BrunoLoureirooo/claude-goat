@@ -7,8 +7,7 @@
 // Flags: --install (install only), --init (init only), --no-claude (init: skip the
 // interview launch), --no-plugins (install: skip plugin + MCP installs), --no-orchestrator
 // (install: the worker agents only — no orchestrator agent, directions, hook or its settings),
-// --no-repowise (skip the repowise CLI install and, in init, the index; the CI workflow and
-// .gitignore lines are still written).
+// --no-ripgrep (install: skip the ripgrep install).
 // Pass neither --install nor --init and:
 //   - repo mode, run from the repo root            → install only
 //   - repo mode, run from elsewhere                 → both
@@ -48,7 +47,7 @@ const project = process.cwd();
 const noClaude = process.argv.includes("--no-claude");
 const noPlugins = process.argv.includes("--no-plugins");
 const noOrchestrator = process.argv.includes("--no-orchestrator");
-const noRepowise = process.argv.includes("--no-repowise");
+const noRipgrep = process.argv.includes("--no-ripgrep");
 const flagInstall = process.argv.includes("--install");
 const flagInit = process.argv.includes("--init");
 const winShell = process.platform === "win32";
@@ -154,101 +153,23 @@ async function copySkill(name, dest) {
 }
 
 
-// ── repowise: codebase index for agents (https://github.com/repowise-dev/repowise) ─────────────
-// the index (databases, caches) stays local; the small shareable config files are committed
-const REPOWISE_IGNORES = [".repowise/*", "!.repowise/config.yaml", "!.repowise/decisions.yaml", "!.repowise/health-rules.json", "!.repowise/policies.yaml", "!.repowise/teams.yaml", ".claude/CLAUDE.md", ".vscode/mcp.json", ".vscode/extensions.json", ".github/copilot-instructions.md"];
-
+// ── ripgrep: the workers search with rg (see agents/*-worker.md), so make sure it is installed ──
 function hasCmd(cmd, args = ["--version"]) {
   const r = spawnSync(cmd, args, { encoding: "utf8", shell: winShell });
   return !r.error && r.status === 0;
 }
 
-// uv is how repowise gets installed; install it when neither uv nor pipx is present
-function ensureUv() {
-  if (hasCmd("uv") || hasCmd("pipx")) return;
-  console.log("→ uv not found — installing it…");
+function ensureRipgrep() {
+  if (hasCmd("rg")) { console.log("⚠ ripgrep already installed — skipped"); return; }
   const attempts = winShell
-    ? [["powershell", ["-ExecutionPolicy", "ByPass", "-c", "irm https://astral.sh/uv/install.ps1 | iex"]]]
-    : [...(hasCmd("brew") ? [["brew", ["install", "uv"]]] : []), ["sh", ["-c", "curl -LsSf https://astral.sh/uv/install.sh | sh"]]];
+    ? [["winget", ["install", "--id", "BurntSushi.ripgrep.MSVC", "-e"]]]
+    : [["brew", ["install", "ripgrep"]]];
   for (const [cmd, args] of attempts) {
-    if (spawnSync(cmd, args, { stdio: "inherit", shell: winShell }).status !== 0) continue;
-    // the standalone installer puts uv in ~/.local/bin (or ~/.cargo/bin), which this process may not have on PATH yet
-    process.env.PATH = [join(homedir(), ".local", "bin"), join(homedir(), ".cargo", "bin"), process.env.PATH].join(delimiter);
-    if (hasCmd("uv")) { console.log("✓ uv"); return; }
+    if (!hasCmd(cmd)) continue;
+    console.log(`→ installing ripgrep via ${cmd}…`);
+    if (spawnSync(cmd, args, { stdio: "inherit", shell: winShell }).status === 0 && hasCmd("rg")) { console.log("✓ ripgrep"); return; }
   }
-  console.log("⚠ couldn't install uv — see https://docs.astral.sh/uv/getting-started/installation/");
-}
-
-// installs the repowise CLI once (uv, else pipx); returns whether it is on PATH afterwards
-function ensureRepowise() {
-  process.env.PATH = [join(homedir(), ".local", "bin"), process.env.PATH].join(delimiter); // where uv/pipx put tools
-  if (hasCmd("repowise")) { console.log("⚠ repowise already installed — skipped"); return true; }
-  ensureUv();
-  for (const [tool, args] of [["uv", ["tool", "install", "repowise"]], ["pipx", ["install", "repowise"]]]) {
-    if (!hasCmd(tool)) continue;
-    console.log(`→ installing repowise via ${tool}…`);
-    if (spawnSync(tool, args, { stdio: "inherit", shell: winShell }).status === 0 && hasCmd("repowise")) {
-      console.log("✓ repowise");
-      return true;
-    }
-  }
-  console.log("⚠ repowise not installed — install uv (https://docs.astral.sh/uv/), then: uv tool install repowise");
-  return false;
-}
-
-// appends a marker-delimited hook script to .git/hooks/<name> (creating it if needed); idempotent
-async function installHook(project, name, marker, template) {
-  const hookPath = join(project, ".git", "hooks", name);
-  const existing = (await exists(hookPath)) ? await readFile(hookPath, "utf8") : "";
-  if (existing.includes(marker)) { console.log(`⚠ ${name} hook already installed — skipped`); return; }
-  const body = await readSource(template);
-  await mkdir(dirname(hookPath), { recursive: true });
-  await writeFile(hookPath, existing ? existing.replace(/\s*$/, "\n") + body.replace(/^#!.*\n/, "") : body);
-  await chmod(hookPath, 0o755);
-  console.log(`✓ .git/hooks/${name} (${marker.replace("-start", "")})`);
-}
-
-// per-project: index with repowise (no model calls), keep it out of git, add the CI gates and the
-// post-merge hook. Idempotent; every step skips what exists.
-async function setupRepowise(project) {
-  const git = (...a) => spawnSync("git", a, { cwd: project, encoding: "utf8", shell: winShell });
-  const isRepo = git("rev-parse", "--git-dir").status === 0;
-  const hasCommit = isRepo && git("rev-parse", "--verify", "HEAD").status === 0;
-
-  // .gitignore: the index and the machine-specific editor files stay local
-  const ignorePath = join(project, ".gitignore");
-  const current = (await exists(ignorePath)) ? await readFile(ignorePath, "utf8") : "";
-  const missing = REPOWISE_IGNORES.filter((l) => !current.split(/\r?\n/).includes(l));
-  if (missing.length) {
-    await writeFile(ignorePath, current + (current && !current.endsWith("\n") ? "\n" : "") + "# repowise (local index + generated editor files; config stays tracked)\n" + missing.join("\n") + "\n");
-    console.log(`✓ .gitignore → ${missing.join(", ")}`);
-  }
-
-  // CI gates
-  const wf = join(".github", "workflows", "repowise.yml");
-  if (await exists(join(project, wf))) {
-    console.log(`⚠ ${wf} already exists — skipped`);
-  } else {
-    await mkdir(join(project, ".github", "workflows"), { recursive: true });
-    await writeFile(join(project, wf), await readSource("templates/repowise.yml"));
-    console.log(`✓ ${wf}`);
-  }
-
-  if (noRepowise) return;
-  if (!isRepo) { console.log("⚠ not a git repo — repowise index and hooks skipped (git init, then re-run init)"); return; }
-
-  // hooks first, so the index is built as soon as possible even when it can't be now: the
-  // bootstrap post-commit hook builds it on the first commit (no-op once built), post-merge
-  // refreshes it after pulls. Marker-delimited, so they coexist with other hooks and with
-  // repowise's own post-commit hook.
-  await installHook(project, "post-commit", "repowise-bootstrap-start", "templates/post-commit-bootstrap.sh");
-  await installHook(project, "post-merge", "repowise-merge-hook-start", "templates/post-merge.sh");
-
-  // no immediate init: with the hooks in place, the index is built by the first commit made after
-  // this (the bootstrap hook runs `repowise init --yes --no-prose --no-distill-hook` in the
-  // background), so project setup stays fast and the index reflects the code at that point
-  if (await exists(join(project, ".repowise", "state.json"))) console.log("⚠ .repowise already initialized — skipped");
-  else console.log("→ repowise index: will be built automatically on the next commit (or now: repowise init --yes --no-prose --no-distill-hook)");
+  console.log("⚠ ripgrep not installed — install it with your package manager (https://github.com/BurntSushi/ripgrep#installation)");
 }
 
 async function runInstall() {
@@ -308,7 +229,7 @@ async function runInstall() {
     for (const [src, rel] of ORCHESTRATOR_FILES) await installFile(src, rel);
   }
 
-  if (!noRepowise) ensureRepowise();
+  if (!noRipgrep) ensureRipgrep();
 
   // plugins (via the claude CLI; skipped if already installed)
   if (!noPlugins && PLUGINS.length > 0) {
@@ -422,8 +343,6 @@ async function runInit() {
     console.log(`✓ ${dest}`);
     created++;
   }
-
-  await setupRepowise(project);
 
   if (created === 0) {
     console.log("\n→ project already initialized — nothing scaffolded.");
