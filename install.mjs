@@ -156,7 +156,7 @@ async function copySkill(name, dest) {
 
 // ── repowise: codebase index for agents (https://github.com/repowise-dev/repowise) ─────────────
 // the index (databases, caches) stays local; the small shareable config files are committed
-const REPOWISE_IGNORES = [".repowise/*", "!.repowise/config.yaml", "!.repowise/health-rules.json", "!.repowise/policies.yaml", "!.repowise/teams.yaml", ".claude/CLAUDE.md", ".vscode/mcp.json", ".vscode/extensions.json", ".github/copilot-instructions.md"];
+const REPOWISE_IGNORES = [".repowise/*", "!.repowise/config.yaml", "!.repowise/decisions.yaml", "!.repowise/health-rules.json", "!.repowise/policies.yaml", "!.repowise/teams.yaml", ".claude/CLAUDE.md", ".vscode/mcp.json", ".vscode/extensions.json", ".github/copilot-instructions.md"];
 
 function hasCmd(cmd, args = ["--version"]) {
   const r = spawnSync(cmd, args, { encoding: "utf8", shell: winShell });
