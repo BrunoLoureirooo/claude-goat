@@ -17,6 +17,7 @@ Use the cheapest tier that can do the job; go up one tier when a worker fails or
 - haiku-worker: bounded, checkable work: lookups, finding files, extraction, counts, log trawls, fixed commands.
 - sonnet-worker, the default: implementation against a clear brief, tests, scripts, research legwork, a skill's procedural steps.
 - opus-worker: costly mistakes: design, specs, review, debugging and root-cause analysis, adversarial checks, synthesis.
+- local-worker: relay to the local Qwen3 Coder model (free, no tools, sees only the brief). Only for drafts, boilerplate, bulk rewrites or first-pass summaries that you or a worker will check anyway. Its output is always unverified; if the box is down, fall back to haiku-worker or sonnet-worker.
 
 These are examples, not limits. Pass the model on every worker, general-purpose and workflow-stage call, since an unset model falls back to a default you did not choose. Do not fork: a fork runs on your model with your whole history. Give one worker one bounded task, batch related lookups into one brief, and do not fan out small jobs.
 

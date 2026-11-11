@@ -64,18 +64,27 @@ const MCPS = [
 ];
 
 // top-level settings.json keys asserted on every run (merged in, not replaced wholesale)
-const SETTINGS_PATCH = { effortLevel: "medium" };
+const SETTINGS_PATCH = { model: "opus", effortLevel: "high" };
+// per-model overrides merged into settings.json's "modelSettings" (every Claude 5.5 tier, same values)
+const MODEL_IDS = ["claude-opus-5-5", "claude-sonnet-5-5", "claude-haiku-5-5"];
+const MODEL_SETTINGS_PATCH = { effortLevel: "high", autoCompactWindow: 300000 };
 // env vars merged into settings.json's "env" object, alongside whatever the user already has
-const ENV_PATCH = { ENABLE_STOP_REVIEW: "0" }; // security-guidance: skip the per-turn Stop review
+const ENV_PATCH = { ENABLE_STOP_REVIEW: "0", CLAUDE_CODE_SUBAGENT_MODEL: "haiku" }; // haiku: subagents that name no model // security-guidance: skip the per-turn Stop review
 
 // orchestrator mode: each key is set only when the user has none (never asserted over a choice)
 const ORCHESTRATOR_SETTINGS = { agent: "orchestrator" };
-const ORCHESTRATOR_ENV = { CLAUDE_CODE_SUBAGENT_MODEL: "sonnet", CLAUDE_CODE_FORK_SUBAGENT: "0" };
+const ORCHESTRATOR_ENV = { CLAUDE_CODE_FORK_SUBAGENT: "0" };
 // [source, destination relative to ~/.claude] — installed unless --no-orchestrator
 const ORCHESTRATOR_FILES = [
   ["agents/orchestrator.md", join("agents", "orchestrator.md")],
   ["guidelines/orchestrator.md", join("guidelines", "orchestrator.md")],
   ["hooks/orchestrator-brief.mjs", join("hooks", "orchestrator-brief.mjs")],
+  ["guidelines/orchestrator-local.md", join("guidelines", "orchestrator-local.md")],
+];
+// the local-LLM relay script that agents/local-worker.md calls — installed always
+const LOCAL_FILES = [
+  ["bin/local-llm.mjs", join("bin", "local-llm.mjs")],
+  ["bin/local-llm.json", "local-llm.json"], // tier → model map; edit to match what's pulled on the box
 ];
 const briefHook = join(claudeDir, "hooks", "orchestrator-brief.mjs");
 // forward slashes + double quotes work in cmd, PowerShell and Git Bash alike; POSIX gets single
@@ -170,10 +179,12 @@ async function runInstall() {
     }
   }
   if (settingsReadable) {
-    settings = { ...settings, ...SETTINGS_PATCH, env: { ...(settings.env ?? {}), ...ENV_PATCH } };
+    const modelSettings = { ...(settings.modelSettings ?? {}) };
+    for (const id of MODEL_IDS) modelSettings[id] = { ...(modelSettings[id] ?? {}), ...MODEL_SETTINGS_PATCH };
+    settings = { ...settings, ...SETTINGS_PATCH, modelSettings, env: { ...(settings.env ?? {}), ...ENV_PATCH } };
     const orchestratorNotes = noOrchestrator ? [] : mergeOrchestratorSettings(settings);
     await writeFile(settingsPath, JSON.stringify(settings, null, 2) + "\n");
-    console.log(`✓ settings.json → effortLevel: ${SETTINGS_PATCH.effortLevel}, env.${Object.keys(ENV_PATCH)[0]}=${Object.values(ENV_PATCH)[0]}`);
+    console.log(`✓ settings.json → model: ${SETTINGS_PATCH.model}, effortLevel: ${SETTINGS_PATCH.effortLevel}, autoCompactWindow: ${MODEL_SETTINGS_PATCH.autoCompactWindow} (all models), env.CLAUDE_CODE_SUBAGENT_MODEL=${ENV_PATCH.CLAUDE_CODE_SUBAGENT_MODEL}`);
     for (const note of orchestratorNotes) console.log(note);
   }
 
@@ -191,6 +202,7 @@ async function runInstall() {
     if (name === "orchestrator.md") continue; // part of ORCHESTRATOR_FILES
     await installFile(`agents/${name}`, join("agents", name));
   }
+  for (const [src, rel] of LOCAL_FILES) await installFile(src, rel);
   if (!noOrchestrator) {
     for (const [src, rel] of ORCHESTRATOR_FILES) await installFile(src, rel);
   }

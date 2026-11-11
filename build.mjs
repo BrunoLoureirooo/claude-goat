@@ -33,6 +33,7 @@ await collect("templates");
 await collect("agents");
 await collect("guidelines");
 await collect("hooks");
+await collect("bin");
 
 const payload = gzipSync(JSON.stringify(files), { level: 9 }).toString("base64");
 

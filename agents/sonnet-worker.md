@@ -2,7 +2,7 @@
 name: sonnet-worker
 description: "Default general worker on Sonnet. Good for, among others: implementation against a clear brief, writing and running tests, scripts, data wrangling, research legwork, running a skill's procedural steps. The list is not exhaustive: use it for any well-specified task that is more than a lookup and where a mistake is cheap to catch. The brief defines the task."
 model: sonnet
-effort: medium
+effort: high
 disallowedTools: Agent
 ---
 

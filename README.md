@@ -18,12 +18,12 @@ Why Node and not bash? Claude Code has Node as a hard runtime dependency, so any
 |---|---|---|
 | `global/CLAUDE.md` | `~/.claude/CLAUDE.md` | Existing file is backed up to `~/.claude/CLAUDE_bak.md` first, then overwritten |
 | `skills/*` | `~/.claude/skills/` | Merged in — skill folders that already exist are skipped, everything else already there is left alone |
-| `agents/*` | `~/.claude/agents/` | Same rule: an agent file that already exists is skipped. `haiku-worker`, `sonnet-worker`, `opus-worker`, plus `orchestrator` (see [Orchestrator mode](#orchestrator-mode)) |
+| `agents/*` | `~/.claude/agents/` | Same rule: an agent file that already exists is skipped. `haiku-worker`, `sonnet-worker`, `opus-worker`, `local-worker` (see [Local LLM](#local-llm)), plus `orchestrator` (pinned to Opus; see [Orchestrator mode](#orchestrator-mode)) |
 | `guidelines/orchestrator.md`, `hooks/orchestrator-brief.mjs` | `~/.claude/guidelines/`, `~/.claude/hooks/` | The orchestrator's directions and the SessionStart hook that hands them to each session; skipped if already there (`--no-orchestrator` to opt out) |
 | plugins (superpowers, typescript-lsp, security-guidance) | `claude plugin install` | Installed through the claude CLI from the official marketplace, skipped if already installed (`--no-plugins` to opt out) |
 | MCP servers (playwright, context7) | `claude mcp add --scope user` | Registered through the claude CLI, skipped if already registered (`--no-plugins` covers these too) |
 | `SETTINGS_PATCH` / `ENV_PATCH` in `install.mjs` | `~/.claude/settings.json` | Edited in place — only the listed keys are merged in, everything else already there (`enabledPlugins`, `theme`, your own `env` vars, …) is left alone. Invalid JSON is reported and left untouched rather than clobbered |
-| `ORCHESTRATOR_SETTINGS` / `ORCHESTRATOR_ENV` in `install.mjs` | `~/.claude/settings.json` | Filled in only when absent: `agent: "orchestrator"`, `env.CLAUDE_CODE_SUBAGENT_MODEL: "sonnet"`, `env.CLAUDE_CODE_FORK_SUBAGENT: "0"`; one `SessionStart` hook entry is appended unless an entry with the same command is already there, and only when `agent` is absent or already `"orchestrator"`. Existing hooks and keys are never removed or reordered (`--no-orchestrator` skips all of this) |
+| `ORCHESTRATOR_SETTINGS` / `ORCHESTRATOR_ENV` in `install.mjs` | `~/.claude/settings.json` | Filled in only when absent: `agent: "orchestrator"`, `env.CLAUDE_CODE_FORK_SUBAGENT: "0"`; one `SessionStart` hook entry is appended unless an entry with the same command is already there, and only when `agent` is absent or already `"orchestrator"`. Existing hooks and keys are never removed or reordered (`--no-orchestrator` skips all of this) |
 
 Nothing else in `~/.claude/` is touched — only `CLAUDE.md` (+ its backup), `settings.json` and the `skills/`, `agents/`, `guidelines/` and `hooks/` folders. Re-running is safe (idempotent, backup gets refreshed).
 
@@ -47,10 +47,18 @@ With neither flag:
 - `superpowers` — the brainstorm → plan → execute → verify → ship skill loop; see [templates/interview.md](templates/interview.md) for how it's wired into project init.
 - `typescript-lsp` — real-time TS diagnostics after every edit. Needs the `typescript-language-server` binary on `PATH` (`pnpm add -g typescript typescript-language-server` — plain `npm i -g` needs root on systems where Node is installed system-wide). Only useful in TS/JS projects; harmless elsewhere.
 - `security-guidance` — reviews each change for common vulnerabilities and has Claude fix findings in-session.
-- `effortLevel: "medium"` — the default `"high"` reasons more deeply (and slower) on every single turn; this trades some of that depth for speed. Ask for deeper reasoning explicitly on hard problems.
+- `model: "opus"`, `effortLevel: "high"` and, under `modelSettings` for the opus, sonnet and haiku 5.5 ids, `effortLevel: "high"` + `autoCompactWindow: 300000` — asserted on every run, overriding what was there. `env.CLAUDE_CODE_SUBAGENT_MODEL: "haiku"` is asserted too: subagents that name no model run on Haiku (the workers all name their own).
 - `env.ENABLE_STOP_REVIEW: "0"` — `security-guidance` otherwise runs an LLM diff review after every response, not just at commit/push. This disables just that per-turn pass; pattern-based warnings on edits and the LLM review at `git commit`/`git push` still run.
 - `playwright` MCP — the browser the global CLAUDE.md's Real Verification rule drives for UI work.
 - `context7` MCP — up-to-date library docs on demand, so scaffolded code isn't written against a stale training-cutoff API.
+
+## Local LLM
+
+Subagents can only run Anthropic models, so local models sit behind `agents/local-worker.md`, a cheap Haiku relay. Modes: **draft** sends one self-contained prompt through `bin/local-llm.mjs` (text in, text out); **explore** (read-only) and **edit** drive `opencode run -m ollama/<model>` so the local model gets file tools. Output is always reported UNVERIFIED.
+
+**Regular vs local mode** is decided at session start: the SessionStart hook probes the box (2 s cap). If it answers, the hook appends `guidelines/orchestrator-local.md` plus the resolved tiers, and local models do the bulk of the work (small for discovery, large for writing code), Sonnet is the reserve after two failed local attempts, and Opus plans and orchestrates. If it doesn't, you get plain orchestrator mode (opus/sonnet/haiku workers). `LOCAL_LLM=off` forces regular mode.
+
+**Tiers** (`~/.claude/local-llm.json`, installed from `bin/local-llm.json`): `large` (≈ sonnet) / `medium` / `small` (≈ haiku) each name an Ollama model. A tier whose model isn't installed falls back to the next larger one, so with only the 80B pulled everything runs on it. Add smaller ones with `node ~/.claude/bin/local-llm.mjs --pull small` (and `--pull medium`), edit the json to taste, and register the same models under the `ollama` provider in `~/.config/opencode/opencode.json` for edit mode. Overrides: `LOCAL_LLM_URL`, `LOCAL_LLM_MODEL` (forces one model), `LOCAL_LLM_TIMEOUT_S`. Check it: `node ~/.claude/bin/local-llm.mjs --probe`.
 
 ## Orchestrator mode
 
@@ -59,7 +67,7 @@ After the install (if `agent` wasn't already set), every interactive session run
 - **Off switch:** `ORCHESTRATOR_BRIEF=off` in the environment skips the directions.
 - **One plain session:** `ORCHESTRATOR_BRIEF=off claude --agent claude` (PowerShell: `$env:ORCHESTRATOR_BRIEF="off"; claude --agent claude`, which lasts for that shell).
 - **Workers only:** `node install.mjs --no-orchestrator` installs the three workers and leaves the orchestrator agent, directions, hook and settings keys out.
-- **Undo:** delete `agent` and the `orchestrator-brief.mjs` `SessionStart` entry from `~/.claude/settings.json`; remove `env.CLAUDE_CODE_SUBAGENT_MODEL` and `env.CLAUDE_CODE_FORK_SUBAGENT` too if you want the old subagent defaults back.
+- **Undo:** delete `agent` and the `orchestrator-brief.mjs` `SessionStart` entry from `~/.claude/settings.json`; remove `env.CLAUDE_CODE_FORK_SUBAGENT` too if you want the old subagent defaults back.
 
 Behaviour this relies on, as observed on one Claude Code version: [docs/claude-code-notes.md](docs/claude-code-notes.md).
 
