@@ -22,7 +22,7 @@ import { join } from "node:path";
 const ORDER = ["small", "medium", "large"]; // ascending
 const DEFAULTS = {
   url: "http://100.65.125.13:11434/v1",
-  tiers: { large: "bazobehram/qwen3-coder-next:latest", medium: "qwen3-coder:30b", small: "qwen3-coder:30b" },
+  tiers: { large: "bazobehram/qwen3-coder-next:latest", medium: "bazobehram/qwen3-coder-next:latest", small: "bazobehram/qwen3-coder-next:latest" },
 };
 let cfg = DEFAULTS;
 try {

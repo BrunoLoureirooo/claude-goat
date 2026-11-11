@@ -29,5 +29,5 @@ Use `opus-worker` only where a mistake is expensive and an independent mind is w
 ## Fallbacks
 
 - Box stops answering mid-session (timeout, connection error): treat the task as a failed local attempt and move to Sonnet; tell the user the box dropped.
-- Several tiers resolving to the same model is fine (only one model installed): `explore` then just runs slower on the large model.
+- All local tiers normally resolve to the same model (one model fits the box), so `small` + `explore` and `large` + `edit` differ in role, not in model: there is no cheap/strong split locally, and no reload between them. Keep discovery and writing as separate, bounded tasks anyway.
 - Local `edit` never commits, pushes or merges; those stay yours, on the user's word.
